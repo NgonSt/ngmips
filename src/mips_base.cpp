@@ -610,9 +610,8 @@ void MipsBase::TriggerException(ExceptionCause cause) {
 
   uint32_t opcode_next = Fetch(pc_);
   if (((opcode_next >> 24) & 0xFE) == 0x4A) {
-    // HACK: avoid interrupt right before GTE instruction
-    // Not sure if this is even safe
-    RunInst();
+    // Interrupt on GTE instruction
+    pc_ -= 4;
   }
 
   uint64_t epc = pc_;
