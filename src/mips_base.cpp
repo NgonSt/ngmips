@@ -22,8 +22,6 @@ const uint32_t kPsxKnownNullWritePc[] = {
     0x00000F00, 0xBFC04E90, 0xBFC05164, 0x800585E4,
     0x80059C50, 0x80058788};
 
-int inst_log_num = 0;
-
 bool get_overflow_add_i32(uint32_t result, uint32_t lhs, uint32_t rhs) {
   return ((lhs ^ result) & (rhs ^ result)) & (1 << 31);
 }
@@ -281,14 +279,6 @@ void MipsBase::CheckInterrupt() {
 }
 
 void MipsBase::RunInst() {
-  if (inst_log_num > 0) {
-    inst_log_num--;
-    if (inst_log_num == 0) {
-      DumpProcessorLog();
-      PANIC("AAA");
-    }
-  }
-
   uint32_t opcode = Fetch(pc_);
   bool is_this_inst_bd = has_branch_delay_;
   if (has_branch_delay_) {
