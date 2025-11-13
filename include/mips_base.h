@@ -6,6 +6,7 @@
 #include "bus_base.h"
 #include "mips_cache.h"
 #include "mips_cop.h"
+#include "mips_hook.h"
 
 typedef __int128_t int128_t;
 typedef __uint128_t uint128_t;
@@ -49,8 +50,10 @@ class MipsBase {
   int RunCached(int cycle);
   void ConnectCop(std::shared_ptr<MipsCopBase> cop, int idx);
   void ConnectBus(std::shared_ptr<BusBase> bus);
+  void ConnectHook(std::shared_ptr<MipsHookBase> hook, int idx);
   void SetPc(uint64_t pc);
   uint64_t GetPc();
+  uint64_t GetGpr(int idx);
   void SetGpr(int idx, uint64_t value);
   void CheckInterrupt();
   MipsCache& GetMipsCache() { return cache_; };
@@ -173,6 +176,7 @@ class MipsBase {
 
   std::shared_ptr<MipsCopBase> cop_[4];
   std::shared_ptr<BusBase> bus_;
+  std::shared_ptr<MipsHookBase> hook_[2];
 
   int mips_log_index_;
   MipsLog mips_log_[kMipsInstLogCount];

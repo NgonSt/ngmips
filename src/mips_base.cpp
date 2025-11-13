@@ -2,11 +2,12 @@
 
 #include <fmt/format.h>
 
-#include "panic.h"
 #include "mips_cache.h"
 #include "mips_cop0.h"
 #include "mips_cop_dummy.h"
 #include "mips_decode.h"
+#include "mips_hook_dummy.h"
+#include "panic.h"
 
 namespace {
 
@@ -21,6 +22,8 @@ const bool kPanicOnNullWrites = false;
 const uint32_t kPsxKnownNullWritePc[] = {
     0x00000F00, 0xBFC04E90, 0xBFC05164, 0x800585E4,
     0x80059C50, 0x80058788};
+
+constexpr bool kUseMipsHook = false;
 
 bool get_overflow_add_i32(uint32_t result, uint32_t lhs, uint32_t rhs) {
   return ((lhs ^ result) & (rhs ^ result)) & (1 << 31);
@@ -110,6 +113,8 @@ MipsBase::MipsBase() {
   cop_[1] = std::make_shared<MipsCopDummy>();
   cop_[2] = std::make_shared<MipsCopDummy>();
   cop_[3] = std::make_shared<MipsCopDummy>();
+  hook_[0] = std::make_shared<MipsHookDummy>();
+  hook_[1] = std::make_shared<MipsHookDummy>();
 }
 
 void MipsBase::Reset() {
@@ -139,6 +144,12 @@ void MipsBase::Reset() {
 
   for (int i = 0; i < 4; i++) {
     cop_[i]->Reset();
+  }
+
+  if (kUseMipsHook) {
+    for (auto& hook : hook_) {
+      hook->Reset();
+    }
   }
 }
 
@@ -204,6 +215,12 @@ int MipsBase::RunCached(int cycle) {
         fmt::print("{}\n", log.ToString());
       }
 
+      if (kUseMipsHook) {
+        for (auto& hook : hook_) {
+          hook->OnPreExecute(pc_, opcode);
+        }
+      }
+
       if (has_branch_delay_) {
         next_pc_ = branch_delay_dst_;
         has_branch_delay_ = false;
@@ -238,6 +255,10 @@ void MipsBase::ConnectBus(std::shared_ptr<BusBase> bus) {
   bus_ = bus;
 }
 
+void MipsBase::ConnectHook(std::shared_ptr<MipsHookBase> hook, int idx) {
+  hook_[idx] = hook;
+}
+
 void MipsBase::SetPc(uint64_t pc) {
   pc_ = pc;
   next_pc_ = pc + 4;
@@ -245,6 +266,13 @@ void MipsBase::SetPc(uint64_t pc) {
 
 uint64_t MipsBase::GetPc() {
   return pc_;
+}
+
+uint64_t MipsBase::GetGpr(int idx) {
+  if (idx == 0) {
+    return 0;
+  }
+  return gpr_[idx];
 }
 
 void MipsBase::SetGpr(int idx, uint64_t value) {
@@ -307,6 +335,12 @@ void MipsBase::RunInst() {
 
   if (kLogCpu) {
     fmt::print("{}\n", log.ToString());
+  }
+
+  if (kUseMipsHook) {
+    for (auto& hook : hook_) {
+      hook->OnPreExecute(pc_, opcode);
+    }
   }
 
   inst_ptr_t fp = GetInstFuncPtr(opcode);
@@ -704,6 +738,12 @@ uint32_t MipsBase::Fetch(uint64_t address) {
 }
 
 LoadResult8 MipsBase::Load8(uint64_t address) {
+  if (kUseMipsHook) {
+    for (auto& hook : hook_) {
+      hook->OnLoad8(address);
+    }
+  }
+
   LoadResult8 result = bus_->Load8(address);
   if (!result.has_value) {
     fmt::print("PC: {:08X} | Load from unmapped address: {:08X}\n", pc_, address & 0xFFFFFFFF);
@@ -712,6 +752,12 @@ LoadResult8 MipsBase::Load8(uint64_t address) {
 }
 
 LoadResult16 MipsBase::Load16(uint64_t address) {
+  if (kUseMipsHook) {
+    for (auto& hook : hook_) {
+      hook->OnLoad16(address);
+    }
+  }
+
   LoadResult16 result = bus_->Load16(address);
   if (!result.has_value) {
     fmt::print("PC: {:08X} | Load from unmapped address: {:08X}\n", pc_, address & 0xFFFFFFFF);
@@ -720,6 +766,12 @@ LoadResult16 MipsBase::Load16(uint64_t address) {
 }
 
 LoadResult32 MipsBase::Load32(uint64_t address) {
+  if (kUseMipsHook) {
+    for (auto& hook : hook_) {
+      hook->OnLoad32(address);
+    }
+  }
+
   LoadResult32 result = bus_->Load32(address);
   if (!result.has_value) {
     fmt::print("PC: {:08X} | Load from unmapped address: {:08X}\n", pc_, address & 0xFFFFFFFF);
@@ -728,6 +780,12 @@ LoadResult32 MipsBase::Load32(uint64_t address) {
 }
 
 LoadResult64 MipsBase::Load64(uint64_t address) {
+  if (kUseMipsHook) {
+    for (auto& hook : hook_) {
+      hook->OnLoad64(address);
+    }
+  }
+
   return bus_->Load64(address);
 }
 
@@ -749,6 +807,12 @@ void MipsBase::Store8(uint64_t address, uint8_t value) {
           PANIC("Null write");
         }
       }
+    }
+  }
+
+  if (kUseMipsHook) {
+    for (auto& hook : hook_) {
+      hook->OnStore8(address, value);
     }
   }
 
@@ -779,6 +843,12 @@ void MipsBase::Store16(uint64_t address, uint16_t value) {
     }
   }
 
+  if (kUseMipsHook) {
+    for (auto& hook : hook_) {
+      hook->OnStore16(address, value);
+    }
+  }
+
   bus_->Store16(address, value);
   if (kUseCachedInterp) {
     // InvalidateBlock(address);
@@ -806,6 +876,12 @@ void MipsBase::Store32(uint64_t address, uint32_t value) {
     }
   }
 
+  if (kUseMipsHook) {
+    for (auto& hook : hook_) {
+      hook->OnStore32(address, value);
+    }
+  }
+
   bus_->Store32(address, value);
   if (kUseCachedInterp) {
     // InvalidateBlock(address);
@@ -815,6 +891,12 @@ void MipsBase::Store32(uint64_t address, uint32_t value) {
 void MipsBase::Store64(uint64_t address, uint64_t value) {
   if (cop_[0]->Read32Internal(12) & (1 << 16)) {
     return;
+  }
+
+  if (kUseMipsHook) {
+    for (auto& hook : hook_) {
+      hook->OnStore64(address, value);
+    }
   }
 
   bus_->Store64(address, value);
