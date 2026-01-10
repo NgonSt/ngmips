@@ -235,6 +235,7 @@ int MipsBase::RunCached(int cycle) {
     }
 
     CheckHook();
+    cache_.ExecuteCacheClear();
 
     cpi_counter_ += block->cycle_;
     int cpi_integer = cpi_counter_ >> 8;
@@ -243,7 +244,6 @@ int MipsBase::RunCached(int cycle) {
     cycle_spent_total_ += cpi_integer;
   }
 
-  cache_.ExecuteCacheClear();
   return cycle_spent_;
 }
 
@@ -884,7 +884,7 @@ void MipsBase::Store32(uint64_t address, uint32_t value) {
 
   bus_->Store32(address, value);
   if (kUseCachedInterp) {
-    // InvalidateBlock(address);
+    InvalidateBlock(address);
   }
 }
 

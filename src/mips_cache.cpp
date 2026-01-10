@@ -2,6 +2,28 @@
 
 #include "panic.h"
 
+namespace {
+
+constexpr uint64_t kPhysicalUnmappedAddress = 0xFFFFFFFFFFFFFFFFUL;
+
+uint64_t calculate_physical_address_psx(uint64_t address) {
+  address &= 0xFFFFFFFF;
+
+  bool is_valid_kuseg = address < 0x20000000;
+  bool is_unmapped_kuseg = (address >= 0x20000000) && (address < 0x80000000);
+  bool is_kseg0 = (address >= 0x80000000) && (address < 0xA0000000);
+  bool is_kseg1 = (address >= 0xA0000000) && (address < 0xC0000000);
+  bool is_kseg2 = address >= 0xC0000000;
+  if (is_unmapped_kuseg || is_kseg2) {
+    return kPhysicalUnmappedAddress;
+  }
+
+  uint32_t address_mapped = address & 0x1FFFFFFC;
+  return address_mapped;
+}
+
+}  // namespace
+
 MipsCache::MipsCache() {
   lookup_cache_index_ = 0;
   for (int i = 0; i < kLookupCacheSize; i++) {
@@ -22,7 +44,12 @@ void MipsCache::Reset() {
 }
 
 MipsCacheBlock* MipsCache::GetBlock(uint64_t address) {
+  address = calculate_physical_address_psx(address);
   if (!kUseCachedInterp) {
+    return nullptr;
+  }
+
+  if (address == kPhysicalUnmappedAddress) {
     return nullptr;
   }
 
@@ -47,6 +74,7 @@ MipsCacheBlock* MipsCache::GetBlock(uint64_t address) {
 }
 
 MipsCacheBlock* MipsCache::GetOverlappingEntry(uint64_t address) {
+  address = calculate_physical_address_psx(address);
   if (!kUseCachedInterp) {
     return nullptr;
   }
@@ -59,7 +87,14 @@ void MipsCache::InsertBlock(const MipsCacheBlock& block) {
     return;
   }
 
-  cache_.insert(std::make_pair(block.start_, block));
+  MipsCacheBlock block_copy = block;
+  block_copy.start_ = calculate_physical_address_psx(block_copy.start_);
+
+  if (block_copy.start_ == kPhysicalUnmappedAddress) {
+    return;
+  }
+
+  cache_.insert(std::make_pair(block_copy.start_, block_copy));
 
   // Clear lookup cache since hash map may have rehashed, invalidating pointers
   // This is safe but conservative - only happens on new block creation
@@ -72,10 +107,31 @@ void MipsCache::InvalidateBlock(uint64_t address) {
   if (!kUseCachedInterp) {
     return;
   }
-  address &= 0xFFFFFFFF;
+  address = calculate_physical_address_psx(address);
 
-  // Queue the address for deferred deletion
-  pending_invalidations_.push_back(address);
+  if (address == kPhysicalUnmappedAddress) {
+    return;
+  }
+
+  bool is_in_cache = cache_.find(address) != cache_.end();
+  if (is_in_cache) {
+    pending_invalidations_.insert(address);
+    return;
+  }
+
+  if (pending_invalidations_.find(address) != pending_invalidations_.end()) {
+    return;
+  }
+
+  auto it = cache_.begin();
+  while (it != cache_.end()) {
+    if (address >= it->second.start_ && address < it->second.end_) {
+      pending_invalidations_.insert(it->second.start_);
+      break;
+    } else {
+      ++it;
+    }
+  }
 }
 
 void MipsCache::InvalidateBlockRange(uint64_t start, uint64_t end) {
