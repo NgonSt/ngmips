@@ -2,7 +2,6 @@
 #include <cstdint>
 #include <ankerl/unordered_dense.h>
 #include <unordered_map>
-#include <set>
 
 const bool kUseCachedInterp = true;
 const int kCacheBlockMaxLength = 32;
@@ -23,6 +22,8 @@ struct MipsCacheBlock {
   MipsCacheEntry entries_[kCacheBlockMaxLength];
   int length_;
   int cycle_;
+  bool valid_;
+  bool in_use_;
 };
 
 class MipsCache {
@@ -35,13 +36,11 @@ class MipsCache {
   void InvalidateBlock(uint64_t address);
   void InvalidateBlockRange(uint64_t start, uint64_t end);
   size_t GetSize() { return cache_.size(); };
-  void QueueCacheClear();
-  void ExecuteCacheClear();
+  void DeleteInUseBlock(uint64_t address);
+  void ClearCache();
 
  private:
   ankerl::unordered_dense::map<uint64_t, MipsCacheBlock> cache_;
-  std::set<uint64_t> pending_invalidations_;
-  bool full_clear_queued_ = false;
 
   // Multi-entry lookup cache for fast repeat access
   struct LookupCacheEntry {

@@ -33,8 +33,6 @@ MipsCache::MipsCache() {
 }
 
 void MipsCache::Reset() {
-  full_clear_queued_ = false;
-  pending_invalidations_.clear();
   cache_.clear();
   lookup_cache_index_ = 0;
   for (int i = 0; i < kLookupCacheSize; i++) {
@@ -44,10 +42,10 @@ void MipsCache::Reset() {
 }
 
 MipsCacheBlock* MipsCache::GetBlock(uint64_t address) {
-  address = calculate_physical_address_psx(address);
   if (!kUseCachedInterp) {
     return nullptr;
   }
+  address = calculate_physical_address_psx(address);
 
   if (address == kPhysicalUnmappedAddress) {
     return nullptr;
@@ -74,10 +72,10 @@ MipsCacheBlock* MipsCache::GetBlock(uint64_t address) {
 }
 
 MipsCacheBlock* MipsCache::GetOverlappingEntry(uint64_t address) {
-  address = calculate_physical_address_psx(address);
   if (!kUseCachedInterp) {
     return nullptr;
   }
+  address = calculate_physical_address_psx(address);
 
   return nullptr;
 }
@@ -89,6 +87,8 @@ void MipsCache::InsertBlock(const MipsCacheBlock& block) {
 
   MipsCacheBlock block_copy = block;
   block_copy.start_ = calculate_physical_address_psx(block_copy.start_);
+  block_copy.valid_ = true;
+  block_copy.in_use_ = false;
 
   if (block_copy.start_ == kPhysicalUnmappedAddress) {
     return;
@@ -113,21 +113,20 @@ void MipsCache::InvalidateBlock(uint64_t address) {
     return;
   }
 
-  bool is_in_cache = cache_.find(address) != cache_.end();
-  if (is_in_cache) {
-    pending_invalidations_.insert(address);
-    return;
-  }
-
-  if (pending_invalidations_.find(address) != pending_invalidations_.end()) {
-    return;
-  }
-
   auto it = cache_.begin();
   while (it != cache_.end()) {
     if (address >= it->second.start_ && address < it->second.end_) {
-      pending_invalidations_.insert(it->second.start_);
-      break;
+      for (int i = 0; i < kLookupCacheSize; i++) {
+        if (lookup_cache_[i].block_ == &it->second) {
+          lookup_cache_[i].block_ = nullptr;
+        }
+      }
+      if (it->second.in_use_) {
+        it->second.valid_ = false;
+        ++it;
+      } else {
+        it = cache_.erase(it);
+      }
     } else {
       ++it;
     }
@@ -137,43 +136,45 @@ void MipsCache::InvalidateBlock(uint64_t address) {
 void MipsCache::InvalidateBlockRange(uint64_t start, uint64_t end) {
 }
 
-void MipsCache::QueueCacheClear() {
-  full_clear_queued_ = true;
-}
+void MipsCache::DeleteInUseBlock(uint64_t address) {
+  if (!kUseCachedInterp) {
+    return;
+  }
+  address = calculate_physical_address_psx(address);
 
-void MipsCache::ExecuteCacheClear() {
-  if (full_clear_queued_) {
-    cache_.clear();
-    pending_invalidations_.clear();
-    full_clear_queued_ = false;
-    // Clear lookup cache
-    for (int i = 0; i < kLookupCacheSize; i++) {
-      lookup_cache_[i].address_ = 0;
-      lookup_cache_[i].block_ = nullptr;
-    }
+  if (address == kPhysicalUnmappedAddress) {
     return;
   }
 
-  // Process individual invalidations
-  if (!pending_invalidations_.empty()) {
-    for (uint64_t address : pending_invalidations_) {
-      // Find the block that contains this address
-      auto it = cache_.begin();
-      while (it != cache_.end()) {
-        if (address >= it->second.start_ && address < it->second.end_) {
-          // Invalidate lookup cache entries pointing to this block
-          for (int i = 0; i < kLookupCacheSize; i++) {
-            if (lookup_cache_[i].block_ == &it->second) {
-              lookup_cache_[i].block_ = nullptr;
-            }
-          }
-          it = cache_.erase(it);
-          break;
-        } else {
-          ++it;
-        }
+  auto it = cache_.find(address);
+  if (it != cache_.end()) {
+    if (it->second.in_use_) {
+      cache_.erase(it);
+    }
+    else {
+      PANIC("DeleteInUseBlock called on non-in-use block");
+    }
+  }
+}
+
+void MipsCache::ClearCache() {
+  auto it = cache_.begin();
+  while (it != cache_.end()) {
+    for (int i = 0; i < kLookupCacheSize; i++) {
+      if (lookup_cache_[i].block_ == &it->second) {
+        lookup_cache_[i].block_ = nullptr;
       }
     }
-    pending_invalidations_.clear();
+    if (it->second.in_use_) {
+      it->second.valid_ = false;
+      ++it;
+    } else {
+      it = cache_.erase(it);
+    }
+  }
+
+  for (int i = 0; i < kLookupCacheSize; i++) {
+    lookup_cache_[i].address_ = 0;
+    lookup_cache_[i].block_ = nullptr;
   }
 }

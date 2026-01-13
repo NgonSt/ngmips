@@ -17,8 +17,8 @@ const bool kPanicOnUnalignedJump = false;
 const bool kLogMipsState = false;
 const int kMipsCpi = 0x200;
 
-const bool kLogNullWrites = true;
-const bool kPanicOnNullWrites = false;
+const bool kLogNullWrites = false;
+const bool kPanicOnNullWrites = true;
 const uint32_t kPsxKnownNullWritePc[] = {
     0x00000F00, 0xBFC04E90, 0xBFC05164, 0x800585E4,
     0x80059C50, 0x80058788};
@@ -171,7 +171,7 @@ int MipsBase::RunCached(int cycle) {
   cycle_spent_ = 0;
   while (cycle_spent_ < cycle) {
     CheckInterrupt();
-    const MipsCacheBlock* block = cache_.GetBlock(pc_);
+    MipsCacheBlock* block = cache_.GetBlock(pc_);
     if (block == nullptr) {
       OnNewBlock(pc_);
       block = cache_.GetBlock(pc_);
@@ -179,6 +179,10 @@ int MipsBase::RunCached(int cycle) {
         PANIC("Block creation failed");
       }
     }
+    
+    int block_cycle = block->cycle_;
+    uint32_t block_address = block->start_;
+    block->in_use_ = true;
 
     const int length = block->length_;
     const MipsCacheEntry* entries = block->entries_;
@@ -228,20 +232,33 @@ int MipsBase::RunCached(int cycle) {
         next_pc_ = pc_ + 4;
       }
 
-      (this->*fp)(opcode);
+      (this->*fp)(opcode); // DO NOT REFERENCE block or entries AFTER THIS LINE! THEY MIGHT BE INVALIDATED!
       ExecuteDelayedLoad();
 
       pc_ = next_pc_ & 0xFFFFFFFF;
+      
+      if (!block->valid_) {
+        printf("In-use block invalidated: %08X\n", block_address);
+        cache_.DeleteInUseBlock(block_address);
+        block = nullptr;
+        break;
+      }
     }
 
     CheckHook();
-    cache_.ExecuteCacheClear();
 
-    cpi_counter_ += block->cycle_;
+    cpi_counter_ += block_cycle;
     int cpi_integer = cpi_counter_ >> 8;
     cpi_counter_ &= 0xFF;
     cycle_spent_ += cpi_integer;
     cycle_spent_total_ += cpi_integer;
+    
+    if (block != nullptr) {
+      block->in_use_ = false;
+      if (!block->valid_) {
+        cache_.DeleteInUseBlock(block_address);
+      }
+    }
   }
 
   return cycle_spent_;
