@@ -1,0 +1,687 @@
+#include "mips_fpu.h"
+
+#include <fmt/format.h>
+
+#include "mips_base.h"
+#include "panic.h"
+
+namespace {
+
+class FpuRTypeInst {
+ private:
+  uint32_t raw_;
+
+ public:
+  FpuRTypeInst(uint32_t opcode) {
+    raw_ = opcode;
+  }
+
+  uint8_t funct() { return raw_ & 0b111111; };
+  uint8_t fd() { return (raw_ >> 6) & 0b11111; };
+  uint8_t fs() { return (raw_ >> 11) & 0b11111; };
+  uint8_t ft() { return (raw_ >> 16) & 0b11111; };
+  uint8_t fmt() { return (raw_ >> 21) & 0b11111; };
+  uint8_t op() { return (raw_ >> 26) & 0b111111; };
+};
+
+template <class T>
+T compare(uint32_t opcode, T ft, T fs) {
+  uint8_t cond = opcode & 0x7;
+  bool allow_unordered = opcode & 0x8;
+  bool gt = ft > fs;   // Greater Than
+  bool lt = ft < fs;   // Less than
+  bool eq = ft == fs;  // Equal
+  bool un = false;     // Unordered
+
+  bool result = false;
+  switch (cond) {
+    case 0:  // F
+      result = false;
+      break;
+    case 1:  // NGLE
+      result = !gt && !lt && !eq;
+      break;
+    case 2:  // EQ
+      result = eq;
+      break;
+    case 3:  // NGL
+      result = !gt && !lt;
+      break;
+    case 4:  // LT
+      result = lt;
+      break;
+    case 5:  // NGE
+      result = !gt && !eq;
+      break;
+    case 6:  // LE
+      result = lt || eq;
+      break;
+    default:
+      PANIC("Unknown condition {}\n", cond);
+      break;
+  }
+
+  // fmt::print("C {} | {} vs {} = {}\n", cond, ft, fs, result);
+  return result;
+}
+
+}  // namespace
+
+MipsFpu::MipsFpu() {
+}
+
+void MipsFpu::ConnectCpu(MipsBase* cpu) {
+  cpu_ = cpu;
+}
+
+void MipsFpu::Reset() {
+}
+
+void MipsFpu::Command(uint32_t command) {
+  // fmt::print("FPU command: {:08X}\n", command);
+  uint8_t funct = command & 0x3F;
+  switch (funct) {
+    case 0x00:
+      InstAdd(command);
+      break;
+    case 0x01:
+      InstSub(command);
+      break;
+    case 0x02:
+      InstMul(command);
+      break;
+    case 0x03:
+      InstDiv(command);
+      break;
+    case 0x04:
+      InstSqrt(command);
+      break;
+    case 0x05:
+      InstAbs(command);
+      break;
+    case 0x06:
+      InstMov(command);
+      break;
+    case 0x07:
+      InstNeg(command);
+      break;
+    case 0x08:
+      InstRoundL(command);
+      break;
+    case 0x09:
+      InstTruncL(command);
+      break;
+    case 0x0A:
+      InstCeilL(command);
+      break;
+    case 0x0B:
+      InstFloorL(command);
+      break;
+    case 0x0C:
+      InstRoundW(command);
+      break;
+    case 0x0D:
+      InstTruncW(command);
+      break;
+    case 0x0E:
+      InstCeilW(command);
+      break;
+    case 0x0F:
+      InstFloorW(command);
+      break;
+    case 0x20:
+      InstCvtS(command);
+      break;
+    case 0x21:
+      InstCvtD(command);
+      break;
+    case 0x24:
+      InstCvtW(command);
+      break;
+    case 0x25:
+      InstCvtL(command);
+      break;
+    default:
+      if (funct >= 0x30) {
+        InstC(command);
+      } else {
+        fmt::print("Unknown FPU instruction: {:08X}\n", command);
+      }
+      break;
+  }
+}
+
+uint32_t MipsFpu::Read32(int idx) {
+  if (idx < 32) {
+    return fpr_[idx];
+  } else if (idx == 32 + 0) {
+    return 0xB00;
+  } else if (idx == 32 + 31) {
+    return fcr31_;
+  }
+  return 0;
+}
+
+void MipsFpu::Write32(int idx, uint32_t value) {
+  if (idx < 32) {
+    fpr_[idx] = value;
+  } else if (idx == 32 + 31) {
+    fcr31_ = value;
+  }
+}
+
+uint64_t MipsFpu::Read64(int idx) {
+  if (idx < 32) {
+    return fpr_[idx];
+  }
+  return Read32(idx);
+}
+
+void MipsFpu::Write64(int idx, uint64_t value) {
+  if (idx < 32) {
+    fpr_[idx] = value;
+  } else {
+    Write32(idx, value);
+  }
+}
+
+bool MipsFpu::GetFlag() {
+  return (fcr31_ & (1 << 23)) != 0;
+}
+
+float MipsFpu::ReadF32(int idx) {
+  uint32_t value = Read32(idx);
+  f32_t f = *reinterpret_cast<f32_t*>(&value);
+  return f;
+}
+
+void MipsFpu::WriteF32(int idx, f32_t value) {
+  uint32_t i = *reinterpret_cast<uint32_t*>(&value);
+  fpr_[idx] = i;
+}
+
+double MipsFpu::ReadF64(int idx) {
+  uint64_t value = 0;
+  bool fr = cpu_->GetCop(0)->Read32Internal(12) & (1 << 26);
+  if (fr) {
+    value = Read64(idx);
+  } else {
+    value = Read32(idx) | (((uint64_t)Read32(idx + 1)) << 32);
+  }
+  f64_t f = *reinterpret_cast<f64_t*>(&value);
+  return f;
+}
+
+void MipsFpu::WriteF64(int idx, f64_t value) {
+  uint64_t i = *reinterpret_cast<uint64_t*>(&value);
+  bool fr = cpu_->GetCop(0)->Read32Internal(12) & (1 << 26);
+  if (fr) {
+    fpr_[idx] = i;
+  } else {
+    fpr_[idx] = i & 0xFFFFFFFF;
+    fpr_[idx + 1] = i >> 32;
+  }
+}
+
+void MipsFpu::InstAdd(uint32_t opcode) {
+  FpuRTypeInst inst(opcode);
+  switch (inst.fmt()) {
+    case 16: {
+      f32_t fs_value = ReadF32(inst.fs());
+      f32_t ft_value = ReadF32(inst.ft());
+      f32_t fd_value = fs_value + ft_value;
+      WriteF32(inst.fd(), fd_value);
+      break;
+    }
+    case 17: {
+      f64_t fs_value = ReadF64(inst.fs());
+      f64_t ft_value = ReadF64(inst.ft());
+      f64_t fd_value = fs_value + ft_value;
+      WriteF64(inst.fd(), fd_value);
+      break;
+    }
+    default:
+      fmt::print("Unknown FPU instruction: {:08X}\n", opcode);
+      break;
+  }
+}
+
+void MipsFpu::InstSub(uint32_t opcode) {
+  FpuRTypeInst inst(opcode);
+  switch (inst.fmt()) {
+    case 16: {
+      f32_t fs_value = ReadF32(inst.fs());
+      f32_t ft_value = ReadF32(inst.ft());
+      f32_t fd_value = fs_value - ft_value;
+      WriteF32(inst.fd(), fd_value);
+      break;
+    }
+    case 17: {
+      f64_t fs_value = ReadF64(inst.fs());
+      f64_t ft_value = ReadF64(inst.ft());
+      f64_t fd_value = fs_value - ft_value;
+      WriteF64(inst.fd(), fd_value);
+      break;
+    }
+    default:
+      fmt::print("Unknown FPU instruction: {:08X}\n", opcode);
+      break;
+  }
+}
+
+void MipsFpu::InstMul(uint32_t opcode) {
+  FpuRTypeInst inst(opcode);
+  switch (inst.fmt()) {
+    case 16: {
+      f32_t fs_value = ReadF32(inst.fs());
+      f32_t ft_value = ReadF32(inst.ft());
+      f32_t fd_value = fs_value * ft_value;
+      WriteF32(inst.fd(), fd_value);
+      break;
+    }
+    case 17: {
+      f64_t fs_value = ReadF64(inst.fs());
+      f64_t ft_value = ReadF64(inst.ft());
+      f64_t fd_value = fs_value * ft_value;
+      WriteF64(inst.fd(), fd_value);
+      break;
+    }
+    default:
+      fmt::print("Unknown FPU instruction: {:08X}\n", opcode);
+      break;
+  }
+}
+
+void MipsFpu::InstDiv(uint32_t opcode) {
+  FpuRTypeInst inst(opcode);
+  switch (inst.fmt()) {
+    case 16: {
+      f32_t fs_value = ReadF32(inst.fs());
+      f32_t ft_value = ReadF32(inst.ft());
+      f32_t fd_value = fs_value / ft_value;
+      WriteF32(inst.fd(), fd_value);
+      break;
+    }
+    case 17: {
+      f64_t fs_value = ReadF64(inst.fs());
+      f64_t ft_value = ReadF64(inst.ft());
+      f64_t fd_value = fs_value / ft_value;
+      WriteF64(inst.fd(), fd_value);
+      break;
+    }
+    default:
+      fmt::print("Unknown FPU instruction: {:08X}\n", opcode);
+      break;
+  }
+}
+
+void MipsFpu::InstSqrt(uint32_t opcode) {
+  FpuRTypeInst inst(opcode);
+  switch (inst.fmt()) {
+    case 16: {
+      f32_t fs_value = ReadF32(inst.fs());
+      f32_t fd_value = sqrtf32(fs_value);
+      WriteF32(inst.fd(), fd_value);
+      break;
+    }
+    case 17: {
+      f64_t fs_value = ReadF64(inst.fs());
+      f64_t fd_value = sqrtf64(fs_value);
+      WriteF64(inst.fd(), fd_value);
+      break;
+    }
+    default:
+      fmt::print("Unknown FPU instruction: {:08X}\n", opcode);
+      break;
+  }
+}
+
+void MipsFpu::InstAbs(uint32_t opcode) {
+  FpuRTypeInst inst(opcode);
+  switch (inst.fmt()) {
+    case 16: {
+      f32_t fs_value = ReadF32(inst.fs());
+      f32_t fd_value = fabsf32(fs_value);
+      WriteF32(inst.fd(), fd_value);
+      break;
+    }
+    case 17: {
+      f64_t fs_value = ReadF64(inst.fs());
+      f64_t fd_value = fabsf64(fs_value);
+      WriteF64(inst.fd(), fd_value);
+      break;
+    }
+    default:
+      fmt::print("Unknown FPU instruction: {:08X}\n", opcode);
+      break;
+  }
+}
+
+void MipsFpu::InstMov(uint32_t opcode) {
+  FpuRTypeInst inst(opcode);
+  switch (inst.fmt()) {
+    case 16: {
+      f32_t fs_value = ReadF32(inst.fs());
+      WriteF32(inst.fd(), fs_value);
+      break;
+    }
+    case 17: {
+      f64_t fs_value = ReadF64(inst.fs());
+      WriteF64(inst.fd(), fs_value);
+      break;
+    }
+    default:
+      fmt::print("Unknown FPU instruction: {:08X}\n", opcode);
+      break;
+  }
+}
+
+void MipsFpu::InstNeg(uint32_t opcode) {
+  FpuRTypeInst inst(opcode);
+  switch (inst.fmt()) {
+    case 16: {
+      f32_t fs_value = ReadF32(inst.fs());
+      f32_t fd_value = -fs_value;
+      WriteF32(inst.fd(), fd_value);
+      break;
+    }
+    case 17: {
+      f64_t fs_value = ReadF64(inst.fs());
+      f64_t fd_value = -fs_value;
+      WriteF64(inst.fd(), fd_value);
+      break;
+    }
+    default:
+      fmt::print("Unknown FPU instruction: {:08X}\n", opcode);
+      break;
+  }
+}
+
+void MipsFpu::InstRoundL(uint32_t opcode) {
+  FpuRTypeInst inst(opcode);
+  switch (inst.fmt()) {
+    case 16: {
+      f32_t fs_value = ReadF32(inst.fs());
+      int64_t fd_value = roundf32(fs_value);
+      Write64(inst.fd(), fd_value);
+      break;
+    }
+    case 17: {
+      f64_t fs_value = ReadF64(inst.fs());
+      int64_t fd_value = roundf64(fs_value);
+      Write64(inst.fd(), fd_value);
+      break;
+    }
+    default:
+      fmt::print("Unknown FPU instruction: {:08X}\n", opcode);
+      break;
+  }
+}
+
+void MipsFpu::InstTruncL(uint32_t opcode) {
+  FpuRTypeInst inst(opcode);
+  switch (inst.fmt()) {
+    case 16: {
+      f32_t fs_value = ReadF32(inst.fs());
+      int64_t fd_value = truncf32(fs_value);
+      Write64(inst.fd(), fd_value);
+      break;
+    }
+    case 17: {
+      f64_t fs_value = ReadF64(inst.fs());
+      int64_t fd_value = truncf64(fs_value);
+      Write64(inst.fd(), fd_value);
+      break;
+    }
+    default:
+      fmt::print("Unknown FPU instruction: {:08X}\n", opcode);
+      break;
+  }
+}
+
+void MipsFpu::InstCeilL(uint32_t opcode) {
+  FpuRTypeInst inst(opcode);
+  switch (inst.fmt()) {
+    case 16: {
+      f32_t fs_value = ReadF32(inst.fs());
+      int64_t fd_value = ceilf32(fs_value);
+      Write64(inst.fd(), fd_value);
+      break;
+    }
+    case 17: {
+      f64_t fs_value = ReadF64(inst.fs());
+      int64_t fd_value = ceilf64(fs_value);
+      Write64(inst.fd(), fd_value);
+      break;
+    }
+    default:
+      fmt::print("Unknown FPU instruction: {:08X}\n", opcode);
+      break;
+  }
+}
+
+void MipsFpu::InstFloorL(uint32_t opcode) {
+  FpuRTypeInst inst(opcode);
+  switch (inst.fmt()) {
+    case 16: {
+      f32_t fs_value = ReadF32(inst.fs());
+      int64_t fd_value = floorf32(fs_value);
+      Write64(inst.fd(), fd_value);
+      break;
+    }
+    case 17: {
+      f64_t fs_value = ReadF64(inst.fs());
+      int64_t fd_value = floorf64(fs_value);
+      Write64(inst.fd(), fd_value);
+      break;
+    }
+    default:
+      fmt::print("Unknown FPU instruction: {:08X}\n", opcode);
+      break;
+  }
+}
+
+void MipsFpu::InstRoundW(uint32_t opcode) {
+  FpuRTypeInst inst(opcode);
+  switch (inst.fmt()) {
+    case 16: {
+      f32_t fs_value = ReadF32(inst.fs());
+      int32_t fd_value = roundf32(fs_value);
+      Write32(inst.fd(), fd_value);
+      break;
+    }
+    case 17: {
+      f64_t fs_value = ReadF64(inst.fs());
+      int32_t fd_value = roundf64(fs_value);
+      Write32(inst.fd(), fd_value);
+      break;
+    }
+    default:
+      fmt::print("Unknown FPU instruction: {:08X}\n", opcode);
+      break;
+  }
+}
+
+void MipsFpu::InstTruncW(uint32_t opcode) {
+  FpuRTypeInst inst(opcode);
+  switch (inst.fmt()) {
+    case 16: {
+      f32_t fs_value = ReadF32(inst.fs());
+      int32_t fd_value = truncf32(fs_value);
+      Write32(inst.fd(), fd_value);
+      break;
+    }
+    case 17: {
+      f64_t fs_value = ReadF64(inst.fs());
+      int32_t fd_value = truncf64(fs_value);
+      Write32(inst.fd(), fd_value);
+      break;
+    }
+    default:
+      fmt::print("Unknown FPU instruction: {:08X}\n", opcode);
+      break;
+  }
+}
+
+void MipsFpu::InstCeilW(uint32_t opcode) {
+  FpuRTypeInst inst(opcode);
+  switch (inst.fmt()) {
+    case 16: {
+      f32_t fs_value = ReadF32(inst.fs());
+      int32_t fd_value = ceilf32(fs_value);
+      Write32(inst.fd(), fd_value);
+      break;
+    }
+    case 17: {
+      f64_t fs_value = ReadF64(inst.fs());
+      int32_t fd_value = ceilf64(fs_value);
+      Write32(inst.fd(), fd_value);
+      break;
+    }
+    default:
+      fmt::print("Unknown FPU instruction: {:08X}\n", opcode);
+      break;
+  }
+}
+
+void MipsFpu::InstFloorW(uint32_t opcode) {
+  FpuRTypeInst inst(opcode);
+  switch (inst.fmt()) {
+    case 16: {
+      f32_t fs_value = ReadF32(inst.fs());
+      int32_t fd_value = floorf32(fs_value);
+      Write32(inst.fd(), fd_value);
+      break;
+    }
+    case 17: {
+      f64_t fs_value = ReadF64(inst.fs());
+      int32_t fd_value = floorf64(fs_value);
+      Write32(inst.fd(), fd_value);
+      break;
+    }
+    default:
+      fmt::print("Unknown FPU instruction: {:08X}\n", opcode);
+      break;
+  }
+}
+
+void MipsFpu::InstCvtS(uint32_t opcode) {
+  FpuRTypeInst inst(opcode);
+  switch (inst.fmt()) {
+    case 17: {
+      f64_t fs_value = ReadF64(inst.fs());
+      f32_t fd_value = fs_value;
+      WriteF32(inst.fd(), fd_value);
+      break;
+    }
+    case 20: {
+      int32_t fs_value = Read32(inst.fs());
+      f32_t fd_value = fs_value;
+      WriteF32(inst.fd(), fd_value);
+      break;
+    }
+    case 21: {
+      int64_t fs_value = Read64(inst.fs());
+      f32_t fd_value = fs_value;
+      WriteF32(inst.fd(), fd_value);
+      break;
+    }
+    default:
+      fmt::print("Unknown FPU instruction: {:08X}\n", opcode);
+      break;
+  }
+}
+
+void MipsFpu::InstCvtD(uint32_t opcode) {
+  FpuRTypeInst inst(opcode);
+  switch (inst.fmt()) {
+    case 16: {
+      f32_t fs_value = ReadF32(inst.fs());
+      f64_t fd_value = fs_value;
+      WriteF64(inst.fd(), fd_value);
+      break;
+    }
+    case 20: {
+      int32_t fs_value = Read32(inst.fs());
+      f64_t fd_value = fs_value;
+      WriteF64(inst.fd(), fd_value);
+      break;
+    }
+    case 21: {
+      int64_t fs_value = Read64(inst.fs());
+      f64_t fd_value = fs_value;
+      WriteF64(inst.fd(), fd_value);
+      break;
+    }
+    default:
+      fmt::print("Unknown FPU instruction: {:08X}\n", opcode);
+      break;
+  }
+}
+
+void MipsFpu::InstCvtW(uint32_t opcode) {
+  FpuRTypeInst inst(opcode);
+  switch (inst.fmt()) {
+    case 16: {
+      f32_t fs_value = ReadF32(inst.fs());
+      int32_t fd_value = fs_value;
+      Write32(inst.fd(), fd_value);
+      break;
+    }
+    case 17: {
+      f64_t fs_value = ReadF64(inst.fs());
+      int32_t fd_value = fs_value;
+      Write32(inst.fd(), fd_value);
+      break;
+    }
+    default:
+      fmt::print("Unknown FPU instruction: {:08X}\n", opcode);
+      break;
+  }
+}
+
+void MipsFpu::InstCvtL(uint32_t opcode) {
+  FpuRTypeInst inst(opcode);
+  switch (inst.fmt()) {
+    case 16: {
+      f32_t fs_value = ReadF32(inst.fs());
+      int64_t fd_value = fs_value;
+      Write64(inst.fd(), fd_value);
+      break;
+    }
+    case 17: {
+      f64_t fs_value = ReadF64(inst.fs());
+      int64_t fd_value = fs_value;
+      Write64(inst.fd(), fd_value);
+      break;
+    }
+    default:
+      fmt::print("Unknown FPU instruction: {:08X}\n", opcode);
+      break;
+  }
+}
+
+void MipsFpu::InstC(uint32_t opcode) {
+  FpuRTypeInst inst(opcode);
+  bool flag = false;
+  switch (inst.fmt()) {
+    case 16: {
+      f32_t fs_value = ReadF32(inst.fs());
+      f32_t ft_value = ReadF32(inst.ft());
+      flag = compare<f32_t>(opcode, fs_value, ft_value);
+      break;
+    }
+    case 17: {
+      f64_t fs_value = ReadF64(inst.fs());
+      f64_t ft_value = ReadF64(inst.ft());
+      flag = compare<f64_t>(opcode, fs_value, ft_value);
+      break;
+    }
+    default:
+      fmt::print("Unknown FPU instruction: {:08X}\n", opcode);
+      break;
+  }
+
+  fcr31_ &= ~(1 << 23);
+  fcr31_ |= flag ? (1 << 23) : 0;
+}

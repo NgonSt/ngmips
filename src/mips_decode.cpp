@@ -2,20 +2,44 @@
 
 #include <fmt/format.h>
 
+namespace {
+
+constexpr bool kAllowMips3Inst = true;
+
+}
+
 MipsInstId DecodeCondBranch(MipsInst inst) {
   uint32_t opcode = inst.GetOpcodeRaw();
   bool is_bgez = opcode & (1 << 16);
   bool is_linked = ((opcode >> 17) & 0xF) == 0x8;
+  bool is_likely = opcode & (1 << 17);
+
   if (is_bgez) {
-    return is_linked ? MipsInstId::kBgezal : MipsInstId::kBgez;
+    if (is_likely) {
+      if (!kAllowMips3Inst) {
+        return MipsInstId::kUnknown;
+      }
+      return is_linked ? MipsInstId::kBgezall : MipsInstId::kBgezl;
+    } else {
+      return is_linked ? MipsInstId::kBgezal : MipsInstId::kBgez;
+    }
   }
 
+  if (is_likely) {
+    if (!kAllowMips3Inst) {
+      return MipsInstId::kUnknown;
+    }
+    return is_linked ? MipsInstId::kBltzall : MipsInstId::kBltzl;
+  }
   return is_linked ? MipsInstId::kBltzal : MipsInstId::kBltz;
 }
 
 MipsInstId DecodeTypeR(RTypeInst inst) {
   if (inst.funct() == 0 && inst.op() == 0 && inst.shamt() == 0 && inst.rd() == 0) {
     return MipsInstId::kNop;
+  }
+  if (inst.funct() == 0xF && inst.op() == 0 && inst.shamt() == 0 && inst.rd() == 0) {
+    return MipsInstId::kSync;
   }
 
   switch (inst.funct()) {
@@ -47,6 +71,12 @@ MipsInstId DecodeTypeR(RTypeInst inst) {
       return MipsInstId::kMflo;
     case 0b010011:
       return MipsInstId::kMtlo;
+    case 0b010100:
+      return kAllowMips3Inst ? MipsInstId::kDsllv : MipsInstId::kUnknown;
+    case 0b010110:
+      return kAllowMips3Inst ? MipsInstId::kDsrlv : MipsInstId::kUnknown;
+    case 0b010111:
+      return kAllowMips3Inst ? MipsInstId::kDsrav : MipsInstId::kUnknown;
     case 0b011000:
       return MipsInstId::kMult;
     case 0b011001:
@@ -55,6 +85,14 @@ MipsInstId DecodeTypeR(RTypeInst inst) {
       return MipsInstId::kDiv;
     case 0b011011:
       return MipsInstId::kDivu;
+    case 0b011100:
+      return kAllowMips3Inst ? MipsInstId::kDmult : MipsInstId::kUnknown;
+    case 0b011101:
+      return kAllowMips3Inst ? MipsInstId::kDmultu : MipsInstId::kUnknown;
+    case 0b011110:
+      return kAllowMips3Inst ? MipsInstId::kDdiv : MipsInstId::kUnknown;
+    case 0b011111:
+      return kAllowMips3Inst ? MipsInstId::kDdivu : MipsInstId::kUnknown;
     case 0b100000:
       return MipsInstId::kAdd;
     case 0b100001:
@@ -75,21 +113,64 @@ MipsInstId DecodeTypeR(RTypeInst inst) {
       return MipsInstId::kSlt;
     case 0b101011:
       return MipsInstId::kSltu;
+    case 0b101100:
+      return kAllowMips3Inst ? MipsInstId::kDadd : MipsInstId::kUnknown;
+    case 0b101101:
+      return kAllowMips3Inst ? MipsInstId::kDaddu : MipsInstId::kUnknown;
+    case 0b101110:
+      return kAllowMips3Inst ? MipsInstId::kDsub : MipsInstId::kUnknown;
+    case 0b101111:
+      return kAllowMips3Inst ? MipsInstId::kDsubu : MipsInstId::kUnknown;
+    case 0b111000:
+      return kAllowMips3Inst ? MipsInstId::kDsll : MipsInstId::kUnknown;
+    case 0b111010:
+      return kAllowMips3Inst ? MipsInstId::kDsrl : MipsInstId::kUnknown;
+    case 0b111011:
+      return kAllowMips3Inst ? MipsInstId::kDsra : MipsInstId::kUnknown;
+    case 0b111100:
+      return kAllowMips3Inst ? MipsInstId::kDsll32 : MipsInstId::kUnknown;
+    case 0b111110:
+      return kAllowMips3Inst ? MipsInstId::kDsrl32 : MipsInstId::kUnknown;
+    case 0b111111:
+      return kAllowMips3Inst ? MipsInstId::kDsra32 : MipsInstId::kUnknown;
   }
   return MipsInstId::kUnknown;
 }
 
 MipsInstId DecodeCop(uint32_t opcode) {
   if (opcode & (1 << 25)) {
-    return MipsInstId::kCop;
+    // return MipsInstId::kCop;
   }
 
   switch (opcode >> 21) {
+    case 0b01000001000:
+    case 0b01000101000:
+    case 0b01001001000:
+    case 0b01001101000:
+      if (kAllowMips3Inst) {
+        uint8_t funct = (opcode >> 16) & 0b11111;
+        switch (funct) {
+          case 0b00000:
+            return MipsInstId::kBcf;
+          case 0b00001:
+            return MipsInstId::kBct;
+          case 0b00010:
+            return MipsInstId::kBcfl;
+          case 0b00011:
+            return MipsInstId::kBctl;
+        }
+      }
+      return MipsInstId::kUnknown;
     case 0b01000000000:
     case 0b01000100000:
     case 0b01001000000:
     case 0b01001100000:
       return MipsInstId::kMfc;
+    case 0b01000000001:
+    case 0b01000100001:
+    case 0b01001000001:
+    case 0b01001100001:
+      return kAllowMips3Inst ? MipsInstId::kDmfc : MipsInstId::kUnknown;
     case 0b01000000010:
     case 0b01000100010:
     case 0b01001000010:
@@ -100,6 +181,11 @@ MipsInstId DecodeCop(uint32_t opcode) {
     case 0b01001000100:
     case 0b01001100100:
       return MipsInstId::kMtc;
+    case 0b01000000101:
+    case 0b01000100101:
+    case 0b01001000101:
+    case 0b01001100101:
+      return kAllowMips3Inst ? MipsInstId::kDmtc : MipsInstId::kUnknown;
     case 0b01000000110:
     case 0b01000100110:
     case 0b01001000110:
@@ -107,7 +193,7 @@ MipsInstId DecodeCop(uint32_t opcode) {
       return MipsInstId::kCtc;
   }
 
-  return MipsInstId::kUnknown;
+  return MipsInstId::kCop;
 }
 
 MipsInstId Decode(uint32_t opcode) {
@@ -150,6 +236,22 @@ MipsInstId Decode(uint32_t opcode) {
     case 0b010010:
     case 0b010011:
       return DecodeCop(opcode);
+    case 0b010100:
+      return kAllowMips3Inst ? MipsInstId::kBeql : MipsInstId::kUnknown;
+    case 0b010101:
+      return kAllowMips3Inst ? MipsInstId::kBnel : MipsInstId::kUnknown;
+    case 0b010110:
+      return kAllowMips3Inst ? MipsInstId::kBlezl : MipsInstId::kUnknown;
+    case 0b010111:
+      return kAllowMips3Inst ? MipsInstId::kBgtzl : MipsInstId::kUnknown;
+    case 0b011000:
+      return kAllowMips3Inst ? MipsInstId::kDaddi : MipsInstId::kUnknown;
+    case 0b011001:
+      return kAllowMips3Inst ? MipsInstId::kDaddiu : MipsInstId::kUnknown;
+    case 0b011010:
+      return MipsInstId::kLdl;
+    case 0b011011:
+      return MipsInstId::kLdr;
     case 0b100000:
       return MipsInstId::kLb;
     case 0b100001:
@@ -164,6 +266,8 @@ MipsInstId Decode(uint32_t opcode) {
       return MipsInstId::kLhu;
     case 0b100110:
       return MipsInstId::kLwr;
+    case 0b100111:
+      return kAllowMips3Inst ? MipsInstId::kLwu : MipsInstId::kUnknown;
     case 0b101000:
       return MipsInstId::kSb;
     case 0b101001:
@@ -172,6 +276,12 @@ MipsInstId Decode(uint32_t opcode) {
       return MipsInstId::kSwl;
     case 0b101011:
       return MipsInstId::kSw;
+    case 0b101100:
+      return kAllowMips3Inst ? MipsInstId::kSdl : MipsInstId::kUnknown;
+    case 0b101101:
+      return kAllowMips3Inst ? MipsInstId::kSdr : MipsInstId::kUnknown;
+    case 0b101111:
+      return kAllowMips3Inst ? MipsInstId::kCache : MipsInstId::kUnknown;
     case 0b101110:
       return MipsInstId::kSwr;
     case 0b110000:
@@ -179,11 +289,23 @@ MipsInstId Decode(uint32_t opcode) {
     case 0b110010:
     case 0b110011:
       return MipsInstId::kLwc;
+    case 0b110100:
+    case 0b110101:
+    case 0b110110:
+      return kAllowMips3Inst ? MipsInstId::kLdc : MipsInstId::kUnknown;
+    case 0b110111:
+      return kAllowMips3Inst ? MipsInstId::kLd : MipsInstId::kUnknown;
     case 0b111000:
     case 0b111001:
     case 0b111010:
     case 0b111011:
       return MipsInstId::kSwc;
+    case 0b111100:
+    case 0b111101:
+    case 0b111110:
+      return kAllowMips3Inst ? MipsInstId::kSdc : MipsInstId::kUnknown;
+    case 0b111111:
+      return MipsInstId::kSd;
   }
   return MipsInstId::kUnknown;
 }
@@ -322,6 +444,94 @@ std::string GetInstName(uint32_t opcode) {
       return "ctc";
     case MipsInstId::kNop:
       return "nop";
+    case MipsInstId::kBcf:
+      return "bcf";
+    case MipsInstId::kBcfl:
+      return "bcfl";
+    case MipsInstId::kBct:
+      return "bct";
+    case MipsInstId::kBctl:
+      return "bctl";
+    case MipsInstId::kBeql:
+      return "beql";
+    case MipsInstId::kBnel:
+      return "bnel";
+    case MipsInstId::kBgezl:
+      return "bgezl";
+    case MipsInstId::kBgezall:
+      return "bgezall";
+    case MipsInstId::kBgtzl:
+      return "bgtzl";
+    case MipsInstId::kBlezl:
+      return "blezl";
+    case MipsInstId::kBltzl:
+      return "bltzl";
+    case MipsInstId::kBltzall:
+      return "bltzall";
+    case MipsInstId::kCache:
+      return "cache";
+    case MipsInstId::kDadd:
+      return "dadd";
+    case MipsInstId::kDaddu:
+      return "daddu";
+    case MipsInstId::kDaddi:
+      return "daddi";
+    case MipsInstId::kDaddiu:
+      return "daddiu";
+    case MipsInstId::kDsub:
+      return "dsub";
+    case MipsInstId::kDsubu:
+      return "dsubu";
+    case MipsInstId::kDmult:
+      return "dmult";
+    case MipsInstId::kDmultu:
+      return "dmultu";
+    case MipsInstId::kDdiv:
+      return "ddiv";
+    case MipsInstId::kDdivu:
+      return "ddivu";
+    case MipsInstId::kDsll:
+      return "dsll";
+    case MipsInstId::kDsll32:
+      return "dsll32";
+    case MipsInstId::kDsllv:
+      return "dsllv";
+    case MipsInstId::kDsra:
+      return "dsra";
+    case MipsInstId::kDsra32:
+      return "dsra32";
+    case MipsInstId::kDsrav:
+      return "dsrav";
+    case MipsInstId::kDsrl:
+      return "dsrl";
+    case MipsInstId::kDsrl32:
+      return "dsrl32";
+    case MipsInstId::kDsrlv:
+      return "dsrlv";
+    case MipsInstId::kDmfc:
+      return "dmfc";
+    case MipsInstId::kDmtc:
+      return "dmtc";
+    case MipsInstId::kLd:
+      return "ld";
+    case MipsInstId::kLdc:
+      return "ldc";
+    case MipsInstId::kLdl:
+      return "ldl";
+    case MipsInstId::kLdr:
+      return "ldr";
+    case MipsInstId::kLwu:
+      return "lwu";
+    case MipsInstId::kSd:
+      return "sd";
+    case MipsInstId::kSdc:
+      return "sdc";
+    case MipsInstId::kSdl:
+      return "sdl";
+    case MipsInstId::kSdr:
+      return "sdr";
+    case MipsInstId::kSync:
+      return "sync";
     case MipsInstId::kUnknown:
       return "unknown";
   }
@@ -345,6 +555,18 @@ bool IsInstBranch(uint32_t opcode) {
     case MipsInstId::kJalr:
     case MipsInstId::kSyscall:
     case MipsInstId::kBreak:
+    case MipsInstId::kBcf:
+    case MipsInstId::kBcfl:
+    case MipsInstId::kBct:
+    case MipsInstId::kBctl:
+    case MipsInstId::kBeql:
+    case MipsInstId::kBnel:
+    case MipsInstId::kBgezl:
+    case MipsInstId::kBgezall:
+    case MipsInstId::kBgtzl:
+    case MipsInstId::kBlezl:
+    case MipsInstId::kBltzl:
+    case MipsInstId::kBltzall:
       return true;
     default:
       return false;
@@ -366,6 +588,18 @@ bool DoesInstHaveDelaySlot(uint32_t opcode) {
     case MipsInstId::kJal:
     case MipsInstId::kJr:
     case MipsInstId::kJalr:
+    case MipsInstId::kBcf:
+    case MipsInstId::kBcfl:
+    case MipsInstId::kBct:
+    case MipsInstId::kBctl:
+    case MipsInstId::kBeql:
+    case MipsInstId::kBnel:
+    case MipsInstId::kBgezl:
+    case MipsInstId::kBgezall:
+    case MipsInstId::kBgtzl:
+    case MipsInstId::kBlezl:
+    case MipsInstId::kBltzl:
+    case MipsInstId::kBltzall:
       return true;
     default:
       return false;
@@ -522,6 +756,11 @@ std::string MipsInst::Disassemble(uint64_t address) {
       return DisassembleMemoryAccess(raw_, address);
     case MipsInstId::kLui:
       return DisassembleLui(raw_, address);
+    case MipsInstId::kBeql:
+    case MipsInstId::kBnel:
+      return DisassembleCondBranchWithRt(raw_, address);
+    case MipsInstId::kSync:
+      return std::string("sync");
     case MipsInstId::kNop:
       return std::string("nop");
   }

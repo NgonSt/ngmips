@@ -28,6 +28,7 @@ class BusBase {
   virtual LoadResult16 Load16(uint64_t address) = 0;
   virtual LoadResult32 Load32(uint64_t address) = 0;
   virtual LoadResult64 Load64(uint64_t address) = 0;
+  virtual uint32_t Fetch(uint64_t address) = 0;
   virtual void Store8(uint64_t address, uint8_t value) = 0;
   virtual void Store16(uint64_t address, uint16_t value) = 0;
   virtual void Store32(uint64_t address, uint32_t value) = 0;

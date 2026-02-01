@@ -23,15 +23,16 @@ enum class ExceptionCause {
   kSyscall = 8,
   kBkpt = 9,
   kRi = 10,
+  kCop = 11,
   kOvf = 12
 };
 
 class MipsLog {
  public:
-  uint32_t pc_;
+  uint64_t pc_;
   uint32_t inst_;
-  uint32_t gpr_[32];
-  std::string ToString();
+  uint64_t gpr_[32];
+  std::string ToString(bool is_64bit);
 };
 
 struct DelayedLoadOp {
@@ -42,24 +43,48 @@ struct DelayedLoadOp {
   uint32_t value_;
 };
 
+struct MipsConfig {
+  bool is_64bit_;
+  bool use_big_endian_;
+  bool has_load_delay_;
+  bool has_exception_;            // RSP doesn't have exception
+  bool allow_misaligned_access_;  // RSP allows misaligned memory access
+  bool has_cop0_;                 // RSP doesn't have conventional cop0
+  bool has_fpu_;
+  bool has_isolate_cache_bit_;     // for PSX
+  uint8_t cop_decoding_override_;  // if (x & cop_id), redirect lwc/swc/mfc/mtc/cfc/ctc -> cop
+  bool use_hook_;
+};
+
 class MipsBase {
  public:
   MipsBase();
+  MipsBase(MipsConfig config);
+  ~MipsBase();
   void Reset();
   int Run(int cycle);
   int RunCached(int cycle);
+  void RunInst();
   void ConnectCop(std::shared_ptr<MipsCopBase> cop, int idx);
   void ConnectBus(std::shared_ptr<BusBase> bus);
   void ConnectHook(std::shared_ptr<MipsHookBase> hook, int idx);
   void SetPc(uint64_t pc);
+  void SetPcDuringInst(uint64_t pc);
   uint64_t GetPc();
   uint64_t GetGpr(int idx);
   void SetGpr(int idx, uint64_t value);
+  void SetLlbit(bool llbit);
+  bool GetHalt();
+  void SetHalt(bool halt);
+  uint64_t GetTimestamp();
+  void CheckCompare();
+  void ClearCompareInterrupt();
   void CheckInterrupt();
+  MipsCopBase* GetCop(int idx) { return cop_[idx].get(); };
   MipsCache& GetMipsCache() { return cache_; };
+  void DumpProcessorLog();
 
  private:
-  void RunInst();
   inst_ptr_t GetInstFuncPtr(uint32_t opcode);
   uint32_t ReadGpr32(int idx);
   void WriteGpr32(int idx, uint32_t value);
@@ -75,7 +100,7 @@ class MipsBase {
   void ExecuteDelayedLoad();
   void TriggerException(ExceptionCause cause);
   void CheckHook();
-  void DumpProcessorLog();
+  bool IsCopEnabled(int cop_id);
   uint32_t Fetch(uint64_t address);
   LoadResult8 Load8(uint64_t address);
   LoadResult16 Load16(uint64_t address);
@@ -155,16 +180,59 @@ class MipsBase {
   void InstMtc(uint32_t opcode);
   void InstCtc(uint32_t opcode);
   void InstNop(uint32_t opcode);
+
+  void InstBcf(uint32_t opcode);
+  void InstBcfl(uint32_t opcode);
+  void InstBct(uint32_t opcode);
+  void InstBctl(uint32_t opcode);
+  void InstBeql(uint32_t opcode);
+  void InstBnel(uint32_t opcode);
+  void InstBgezl(uint32_t opcode);
+  void InstBgezall(uint32_t opcode);
+  void InstBgtzl(uint32_t opcode);
+  void InstBlezl(uint32_t opcode);
+  void InstBltzl(uint32_t opcode);
+  void InstBltzall(uint32_t opcode);
+  void InstCache(uint32_t opcode);
+  void InstDadd(uint32_t opcode);
+  void InstDaddu(uint32_t opcode);
+  void InstDaddi(uint32_t opcode);
+  void InstDaddiu(uint32_t opcode);
+  void InstDsub(uint32_t opcode);
+  void InstDsubu(uint32_t opcode);
+  void InstDmult(uint32_t opcode);
+  void InstDmultu(uint32_t opcode);
+  void InstDdiv(uint32_t opcode);
+  void InstDdivu(uint32_t opcode);
+  void InstDsll(uint32_t opcode);
+  void InstDsll32(uint32_t opcode);
+  void InstDsllv(uint32_t opcode);
+  void InstDsra(uint32_t opcode);
+  void InstDsra32(uint32_t opcode);
+  void InstDsrav(uint32_t opcode);
+  void InstDsrl(uint32_t opcode);
+  void InstDsrl32(uint32_t opcode);
+  void InstDsrlv(uint32_t opcode);
+  void InstDmfc(uint32_t opcode);
+  void InstDmtc(uint32_t opcode);
+  void InstLd(uint32_t opcode);
+  void InstLdc(uint32_t opcode);
+  void InstLdl(uint32_t opcode);
+  void InstLdr(uint32_t opcode);
+  void InstLwu(uint32_t opcode);
+  void InstSd(uint32_t opcode);
+  void InstSdc(uint32_t opcode);
+  void InstSdl(uint32_t opcode);
+  void InstSdr(uint32_t opcode);
+  void InstSync(uint32_t opcode);
+
   void InstUnknown(uint32_t opcode);
 
   uint64_t gpr_[32];
-  double fpr_[32];
   uint64_t hi_;
   uint64_t lo_;
   uint64_t pc_;
   uint64_t next_pc_;
-  uint32_t fpcr_r0_;
-  uint32_t fpcr_r31_;
   bool llbit_;
 
   int cycle_spent_;
@@ -174,12 +242,19 @@ class MipsBase {
   uint64_t branch_delay_dst_;
   DelayedLoadOp delayed_load_op_;
 
-  std::shared_ptr<MipsCopBase> cop_[4];
-  std::shared_ptr<BusBase> bus_;
+  bool compare_interrupt_;
+  int cop_cause_;
+
   std::shared_ptr<MipsHookBase> hook_[2];
 
   int mips_log_index_;
   MipsLog mips_log_[kMipsInstLogCount];
 
   MipsCache cache_;
+  bool halt_;
+
+ protected:
+  std::shared_ptr<BusBase> bus_;
+  std::shared_ptr<MipsCopBase> cop_[4];
+  MipsConfig config_;
 };

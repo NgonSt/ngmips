@@ -4,7 +4,7 @@
 #include <unordered_map>
 #include <set>
 
-const bool kUseCachedInterp = true;
+const bool kUseCachedInterp = false;
 const int kCacheBlockMaxLength = 32;
 const int kLookupCacheSize = 4;
 
