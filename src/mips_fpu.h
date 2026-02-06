@@ -28,6 +28,7 @@ class MipsFpu : public MipsCopBase {
   void WriteF32(int idx, f32_t value);
   double ReadF64(int idx);
   void WriteF64(int idx, f64_t value);
+  bool GetFr();
 
   void InstAdd(uint32_t opcode);
   void InstSub(uint32_t opcode);

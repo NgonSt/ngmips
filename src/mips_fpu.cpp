@@ -25,7 +25,7 @@ class FpuRTypeInst {
 };
 
 template <class T>
-T compare(uint32_t opcode, T ft, T fs) {
+bool compare(uint32_t opcode, T ft, T fs) {
   uint8_t cond = opcode & 0x7;
   bool allow_unordered = opcode & 0x8;
   bool gt = ft > fs;   // Greater Than
@@ -56,6 +56,9 @@ T compare(uint32_t opcode, T ft, T fs) {
     case 6:  // LE
       result = lt || eq;
       break;
+    case 7:  // NGT
+      result = !gt;
+      break;
     default:
       PANIC("Unknown condition {}\n", cond);
       break;
@@ -63,6 +66,36 @@ T compare(uint32_t opcode, T ft, T fs) {
 
   // fmt::print("C {} | {} vs {} = {}\n", cond, ft, fs, result);
   return result;
+}
+
+int64_t round_f32(f32_t value, int rm) {
+  int64_t result;
+  switch (rm) {
+    case 0:
+      return nearbyintf32(value);
+    case 1:
+      return truncf32(value);
+    case 2:
+      return ceilf32(value);
+    case 3:
+      return floorf32(value);
+  }
+  return 0;
+}
+
+int64_t round_f64(f64_t value, int rm) {
+  int64_t result;
+  switch (rm) {
+    case 0:
+      return nearbyintf64(value);
+    case 1:
+      return truncf64(value);
+    case 2:
+      return ceilf64(value);
+    case 3:
+      return floorf64(value);
+  }
+  return 0;
 }
 
 }  // namespace
@@ -75,6 +108,10 @@ void MipsFpu::ConnectCpu(MipsBase* cpu) {
 }
 
 void MipsFpu::Reset() {
+  for (int i = 0; i < 32; i++) {
+    fpr_[i] = 0;
+  }
+  fcr31_ = 0;
 }
 
 void MipsFpu::Command(uint32_t command) {
@@ -153,7 +190,16 @@ void MipsFpu::Command(uint32_t command) {
 
 uint32_t MipsFpu::Read32(int idx) {
   if (idx < 32) {
-    return fpr_[idx];
+    if (GetFr()) {
+      return static_cast<uint32_t>(fpr_[idx]);
+    } else {
+      int phys = idx & ~1;
+      if (idx & 1) {
+        return static_cast<uint32_t>(fpr_[phys] >> 32);
+      } else {
+        return static_cast<uint32_t>(fpr_[phys]);
+      }
+    }
   } else if (idx == 32 + 0) {
     return 0xB00;
   } else if (idx == 32 + 31) {
@@ -164,7 +210,16 @@ uint32_t MipsFpu::Read32(int idx) {
 
 void MipsFpu::Write32(int idx, uint32_t value) {
   if (idx < 32) {
-    fpr_[idx] = value;
+    if (GetFr()) {
+      fpr_[idx] = value;
+    } else {
+      int phys = idx & ~1;
+      if (idx & 1) {
+        fpr_[phys] = (fpr_[phys] & 0x00000000FFFFFFFF) | (static_cast<uint64_t>(value) << 32);
+      } else {
+        fpr_[phys] = (fpr_[phys] & 0xFFFFFFFF00000000) | value;
+      }
+    }
   } else if (idx == 32 + 31) {
     fcr31_ = value;
   }
@@ -172,6 +227,12 @@ void MipsFpu::Write32(int idx, uint32_t value) {
 
 uint64_t MipsFpu::Read64(int idx) {
   if (idx < 32) {
+    if (!GetFr()) {
+      if (idx & 1) {
+        fmt::print("64bit read to odd-number fpr: {}\n", idx);
+      }
+      idx &= ~1;
+    }
     return fpr_[idx];
   }
   return Read32(idx);
@@ -179,6 +240,12 @@ uint64_t MipsFpu::Read64(int idx) {
 
 void MipsFpu::Write64(int idx, uint64_t value) {
   if (idx < 32) {
+    if (!GetFr()) {
+      if (idx & 1) {
+        fmt::print("64bit write to odd-number fpr: {}\n", idx);
+      }
+      idx &= ~1;
+    }
     fpr_[idx] = value;
   } else {
     Write32(idx, value);
@@ -191,36 +258,27 @@ bool MipsFpu::GetFlag() {
 
 float MipsFpu::ReadF32(int idx) {
   uint32_t value = Read32(idx);
-  f32_t f = *reinterpret_cast<f32_t*>(&value);
-  return f;
+  return *reinterpret_cast<f32_t*>(&value);
 }
 
 void MipsFpu::WriteF32(int idx, f32_t value) {
   uint32_t i = *reinterpret_cast<uint32_t*>(&value);
-  fpr_[idx] = i;
+  Write32(idx, i);
 }
 
 double MipsFpu::ReadF64(int idx) {
-  uint64_t value = 0;
-  bool fr = cpu_->GetCop(0)->Read32Internal(12) & (1 << 26);
-  if (fr) {
-    value = Read64(idx);
-  } else {
-    value = Read32(idx) | (((uint64_t)Read32(idx + 1)) << 32);
-  }
-  f64_t f = *reinterpret_cast<f64_t*>(&value);
-  return f;
+  uint64_t value = Read64(idx);
+  return *reinterpret_cast<f64_t*>(&value);
 }
 
 void MipsFpu::WriteF64(int idx, f64_t value) {
   uint64_t i = *reinterpret_cast<uint64_t*>(&value);
+  Write64(idx, i);
+}
+
+bool MipsFpu::GetFr() {
   bool fr = cpu_->GetCop(0)->Read32Internal(12) & (1 << 26);
-  if (fr) {
-    fpr_[idx] = i;
-  } else {
-    fpr_[idx] = i & 0xFFFFFFFF;
-    fpr_[idx + 1] = i >> 32;
-  }
+  return fr;
 }
 
 void MipsFpu::InstAdd(uint32_t opcode) {
@@ -624,13 +682,13 @@ void MipsFpu::InstCvtW(uint32_t opcode) {
   switch (inst.fmt()) {
     case 16: {
       f32_t fs_value = ReadF32(inst.fs());
-      int32_t fd_value = fs_value;
+      int32_t fd_value = round_f32(fs_value, fcr31_ & 0x3);
       Write32(inst.fd(), fd_value);
       break;
     }
     case 17: {
       f64_t fs_value = ReadF64(inst.fs());
-      int32_t fd_value = fs_value;
+      int32_t fd_value = round_f64(fs_value, fcr31_ & 0x3);
       Write32(inst.fd(), fd_value);
       break;
     }
@@ -645,13 +703,13 @@ void MipsFpu::InstCvtL(uint32_t opcode) {
   switch (inst.fmt()) {
     case 16: {
       f32_t fs_value = ReadF32(inst.fs());
-      int64_t fd_value = fs_value;
+      int64_t fd_value = round_f32(fs_value, fcr31_ & 0x3);
       Write64(inst.fd(), fd_value);
       break;
     }
     case 17: {
       f64_t fs_value = ReadF64(inst.fs());
-      int64_t fd_value = fs_value;
+      int64_t fd_value = round_f64(fs_value, fcr31_ & 0x3);
       Write64(inst.fd(), fd_value);
       break;
     }

@@ -54,6 +54,7 @@ struct MipsConfig {
   bool has_isolate_cache_bit_;     // for PSX
   uint8_t cop_decoding_override_;  // if (x & cop_id), redirect lwc/swc/mfc/mtc/cfc/ctc -> cop
   bool use_hook_;
+  uint16_t cpi_;  // u8.8 fixed point
 };
 
 class MipsBase {

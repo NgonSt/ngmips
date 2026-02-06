@@ -16,8 +16,8 @@ const bool kLogCpu = false;
 const bool kEnablePsxSpecific = false;
 const bool kLogKernel = false;
 const bool kPanicOnUnalignedJump = true;
-const bool kLogMipsState = true;
-const int kMipsCpi = 0x200;
+const bool kLogMipsState = false;
+const bool kEnableIdleLoopDetection = true;
 
 const bool kLogNullWrites = false;
 const bool kPanicOnNullJumps = false;
@@ -464,7 +464,7 @@ void MipsBase::CheckInterrupt() {
     // Solution: we run instruction clean-up manually (aka. a dirty hack)
     if (cpu_intr_enabled && intr_pending) {
       pc_ = next_pc_;
-      cpi_counter_ += kMipsCpi;
+      cpi_counter_ += config_.cpi_;
       int cpi_integer = cpi_counter_ >> 8;
       cpi_counter_ &= 0xFF;
       cycle_spent_ += cpi_integer;
@@ -522,7 +522,7 @@ void MipsBase::RunInst() {
   ExecuteDelayedLoad();
 
   pc_ = next_pc_;
-  cpi_counter_ += kMipsCpi;
+  cpi_counter_ += config_.cpi_;
   int cpi_integer = cpi_counter_ >> 8;
   cpi_counter_ &= 0xFF;
   cycle_spent_ += cpi_integer;
@@ -776,7 +776,7 @@ void MipsBase::WriteGpr32(int idx, uint32_t value) {
 }
 
 uint64_t MipsBase::ReadGpr64(int idx) {
-  return config_.is_64bit_ ? gpr_[idx] : gpr_[idx] & 0xFFFFFFFF;
+  return config_.is_64bit_ ? gpr_[idx] : sext_i32_to_i64(gpr_[idx] & 0xFFFFFFFF);
 }
 
 void MipsBase::WriteGpr32Sext(int idx, int32_t value) {
@@ -855,7 +855,7 @@ void MipsBase::QueueDelayedLoad(int dst, uint64_t value) {
 
 void MipsBase::QueueDelayedCopLoad(int cop_id, int dst, uint64_t value) {
   if (!config_.has_load_delay_) {
-    cop_[cop_id]->Write64(dst, value);
+    cop_[cop_id]->Write32(dst, value);
     return;
   }
   if (delayed_load_op_.is_active_) {
@@ -1059,8 +1059,13 @@ LoadResult8 MipsBase::Load8(uint64_t address) {
   LoadResult8 result = bus_->Load8(address);
   if (!result.has_value) {
     fmt::print("PC: {:08X} | Load from unmapped address: {:08X}\n", pc_, address & 0xFFFFFFFF);
-    DumpProcessorLog();
-    PANIC("Load from unmapped address");
+    if (true) {
+      DumpProcessorLog();
+      PANIC("Load from unmapped address");
+    } else if (config_.has_cop0_) {
+      cop_[0]->Write64Internal(8, address);
+      TriggerException(ExceptionCause::kDbus);
+    }
   }
   return result;
 }
@@ -1272,7 +1277,7 @@ void MipsBase::OnNewBlock(uint64_t address) {
 
   block.end_ = address + block_length * 4;
   block.length_ = block_length;
-  block.cycle_ = block_length * kMipsCpi;
+  block.cycle_ = block_length * config_.cpi_;
 
   cache.InsertBlock(block);
   if (false) {
@@ -1493,7 +1498,7 @@ void MipsBase::InstSub(uint32_t opcode) {
   uint32_t rs_value = ReadGpr32(inst.rs());
   uint32_t rt_value = ReadGpr32(inst.rt());
   uint32_t rd_value = rs_value - rt_value;
-  if (get_overflow_sub_i32(rd_value, rs_value, rt_value)) {
+  if (config_.has_exception_ && get_overflow_sub_i32(rd_value, rs_value, rt_value)) {
     TriggerException(ExceptionCause::kOvf);
   } else {
     WriteGpr32Sext(inst.rd(), rd_value);
@@ -1567,11 +1572,11 @@ void MipsBase::InstBeq(uint32_t opcode) {
   // HACK: No load delay on branch
   ExecuteDelayedLoad();
 
-  if (opcode == 0x1000FFFF) {
-    // IDLE LOOP DETECTION
+  if (kEnableIdleLoopDetection && (opcode == 0x1000FFFF)) {
     uint32_t delay_op = Fetch(pc_ + 4);
     if (delay_op == 0x00000000) {
       cycle_spent_ += 100;
+      cycle_spent_total_ += 100;
     }
   }
 
@@ -1664,6 +1669,13 @@ void MipsBase::InstBltzal(uint32_t opcode) {
 }
 
 void MipsBase::InstJ(uint32_t opcode) {
+  if (kEnableIdleLoopDetection && (opcode == 0x08009771)) {
+    uint32_t delay_op = Fetch(pc_ + 4);
+    if (delay_op == 0x00000000) {
+      cycle_spent_ += 100;
+      cycle_spent_total_ += 100;
+    }
+  }
   JTypeInst inst = MipsInst(opcode).GetJType();
   uint32_t dst = ((pc_ + 4) & 0xF0000000) | (inst.address() << 2);
   Jump32(dst);
@@ -2024,8 +2036,7 @@ void MipsBase::InstMfc(uint32_t opcode) {
   }
 
   uint32_t cop_value = cop_[cop_id]->Read32(inst.rd());
-  // FIXME: Should be sext version
-  WriteGpr32(inst.rt(), cop_value);
+  WriteGpr32Sext(inst.rt(), cop_value);
 }
 
 void MipsBase::InstCfc(uint32_t opcode) {
@@ -2044,8 +2055,7 @@ void MipsBase::InstCfc(uint32_t opcode) {
   }
 
   uint32_t cop_value = cop_[cop_id]->Read32(inst.rd() + 32);
-  // FIXME: Should be sext version
-  WriteGpr32(inst.rt(), cop_value);
+  WriteGpr32Sext(inst.rt(), cop_value);
 }
 
 void MipsBase::InstMtc(uint32_t opcode) {

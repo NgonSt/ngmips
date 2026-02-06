@@ -167,12 +167,20 @@ void MipsCop0::Write32(int idx, uint32_t value) {
       entryhi_ = value;
       break;
     case 11:
-      fmt::print("Write to compare: {:08X}\n", value);
+      fmt::print("Write to compare: {:08X} | count: {:08X}\n", value, GetCount());
       compare_ = value;
       surpress_compare_interrupt_ = true;
       cpu_->ClearCompareInterrupt();
       break;
     case 12:
+      if (false) {
+        bool fr_old = (sr_ & (1 << 26)) != 0;
+        bool fr_new = (value & (1 << 26)) != 0;
+        if (fr_old != fr_new) {
+          cpu_->DumpProcessorLog();
+          PANIC("AAAA");
+        }
+      }
       sr_ = value;
       break;
     case 13:
@@ -271,6 +279,13 @@ void MipsCop0::Write64(int idx, uint64_t value) {
       break;
     case 12:
       // fmt::print("SR: {:08X} -> {:08X} | PC:{:08X}\n", sr_, value, cpu_->GetPc());
+      if (false) {
+        bool fr_old = (sr_ & (1 << 26)) != 0;
+        bool fr_new = (value & (1 << 26)) != 0;
+        if (fr_old != fr_new) {
+          PANIC("AAAA");
+        }
+      }
       sr_ = value;
       break;
     case 13:
@@ -373,13 +388,13 @@ bool MipsCop0::GetFlag() {
 }
 
 bool MipsCop0::CheckCompareInterrupt() {
-  uint64_t timestamp = cpu_->GetTimestamp();
+  uint64_t timestamp = cpu_->GetTimestamp() >> 1;
   if (surpress_compare_interrupt_) {
     surpress_compare_interrupt_ = false;
     last_compare_check_timestamp_ = timestamp;
     return false;
   }
-
+  
   if (last_compare_check_timestamp_ > timestamp) {
     fmt::print("Time went backwards\n");
     last_compare_check_timestamp_ = timestamp;
@@ -391,21 +406,29 @@ bool MipsCop0::CheckCompareInterrupt() {
     return false;
   }
   bool result = false;
-  uint32_t count = GetCount();
-  // FIXME: THIS IS SO SLOW
-  for (int i = 0; i < delta; i++) {
-    count++;
-    if (count == compare_) {
-      result = true;
-      break;
+  if (true) {
+    uint32_t count = last_compare_check_timestamp_ - count_start_timestamp_;;
+    // FIXME: THIS IS SO SLOW
+    for (int i = 0; i < delta; i++) {
+      count++;
+      if (count == compare_) {
+        result = true;
+        break;
+      }
     }
+  } else {
+    uint32_t count_start = (uint32_t)(last_compare_check_timestamp_ - count_start_timestamp_);
+    uint32_t count_end = (uint32_t)(timestamp - count_start_timestamp_);
+    // Check if compare_ is in (count_start, count_end] accounting for wrap
+    bool crossed = (compare_ - count_start - 1) <= (count_end - count_start - 1);
+    result = crossed;
   }
   last_compare_check_timestamp_ = timestamp;
   return result;
 }
 
 void MipsCop0::WriteCount(uint32_t value) {
-  uint64_t timestamp = cpu_->GetTimestamp();
+  uint64_t timestamp = cpu_->GetTimestamp() >> 1;
   if (timestamp < value) {
     count_start_timestamp_ = timestamp;
     return;
@@ -416,7 +439,7 @@ void MipsCop0::WriteCount(uint32_t value) {
 }
 
 uint32_t MipsCop0::GetCount() {
-  uint64_t timestamp = cpu_->GetTimestamp();
+  uint64_t timestamp = cpu_->GetTimestamp() >> 1;
   if (timestamp < count_start_timestamp_) {
     count_start_timestamp_ = timestamp;
     return 0;
