@@ -25,14 +25,9 @@ class MipsCop0 : public MipsCopBase {
 
   MipsBase* cpu_;
 
-  uint32_t index_;
-  uint64_t entrylo0_;
-  uint64_t entrylo1_;
   uint64_t context_;
-  uint32_t page_mask_;
   uint32_t wired_;
   uint64_t badvaddr_;
-  uint64_t entryhi_;
   uint32_t compare_;
   uint32_t sr_;
   uint32_t cause_;

@@ -15,6 +15,7 @@ FetchContent_MakeAvailable(fmt)
 set(MIPS_SOURCES
     src/mips_base.cpp
     src/mips_cop0.cpp
+    src/mips_tlb_normal.cpp
     src/mips_fpu.cpp
     src/mips_cache.cpp
     src/mips_decode.cpp

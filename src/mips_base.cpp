@@ -8,6 +8,9 @@
 #include "mips_decode.h"
 #include "mips_fpu.h"
 #include "mips_hook_dummy.h"
+#include "mips_tlb.h"
+#include "mips_tlb_dummy.h"
+#include "mips_tlb_normal.h"
 #include "panic.h"
 
 namespace {
@@ -136,6 +139,11 @@ MipsBase::MipsBase() {
   for (int i = 0; i < 4; i++) {
     cop_[i]->ConnectCpu(this);
   }
+  if (config_.has_tlb_) {
+    tlb_ = std::make_shared<MipsTlbNormal>();
+  } else {
+    tlb_ = std::make_shared<MipsTlbDummy>();
+  }
   hook_[0] = std::make_shared<MipsHookDummy>();
   hook_[1] = std::make_shared<MipsHookDummy>();
 }
@@ -178,6 +186,11 @@ MipsBase::MipsBase(MipsConfig config) {
   for (int i = 0; i < 4; i++) {
     cop_[i]->ConnectCpu(this);
   }
+  if (config_.has_tlb_) {
+    tlb_ = std::make_shared<MipsTlbNormal>();
+  } else {
+    tlb_ = std::make_shared<MipsTlbDummy>();
+  }
   hook_[0] = std::make_shared<MipsHookDummy>();
   hook_[1] = std::make_shared<MipsHookDummy>();
 }
@@ -217,6 +230,8 @@ void MipsBase::Reset() {
   for (int i = 0; i < 4; i++) {
     cop_[i]->Reset();
   }
+
+  tlb_->Reset();
 
   if (config_.use_hook_) {
     for (auto& hook : hook_) {
@@ -946,9 +961,10 @@ void MipsBase::TriggerException(ExceptionCause cause) {
   cop_[0]->Write32Internal(13, cause_reg_new);
 
   uint32_t sr_reg = cop_[0]->Read32Internal(12);
+  bool exl = sr_reg & 2;
   if (config_.is_64bit_) {
     // Handle EXL bit
-    if (!(sr_reg & 2)) {
+    if (!exl) {
       cop_[0]->Write64Internal(14, epc);
       sr_reg |= 2;
     }
@@ -967,6 +983,10 @@ void MipsBase::TriggerException(ExceptionCause cause) {
     next_pc_ = pc_;
   } else {
     uint32_t vec_address_general = 0x80000180;
+    if (cause == ExceptionCause::kTlbMod || cause == ExceptionCause::kTlbMissLoad || cause == ExceptionCause::kTlbMissStore) {
+      vec_address_general = exl ? 0x80000180 : 0x80000000;
+      fmt::print("TLB exception {} | BadVAddr = {:08X}\n", static_cast<int>(cause), cop_[0]->Read32Internal(8));
+    }
     pc_ = vec_address_general;
     next_pc_ = pc_;
   }
@@ -1031,53 +1051,58 @@ void MipsBase::DumpProcessorLog() {
 }
 
 uint32_t MipsBase::Fetch(uint64_t address) {
-  if (false) {
-    bool is_pc_in_rom = (address >= 0x1FC00000 && address < 0x1FC80000) || (address >= 0x9FC00000 && address < 0x9FC80000) || (address >= 0xBFC00000 && address < 0xBFC80000);
-    bool is_pc_in_ram = (address < 0x00200000) || (address >= 0x80000000 && address < 0x80200000) || (address >= 0xA0000000 && address < 0xA0200000);
-    if (!is_pc_in_rom && !is_pc_in_ram) {
-      fmt::print("PC OoB: {:08X}\n", address);
-      DumpProcessorLog();
-      PANIC("PC OoB: {:08X}\n", address);
-    }
+  MipsTlbTranslationResult tlb_result = tlb_->TranslateAddress(address);
+  if (!tlb_result.found_) {
+    cop_[0]->Write64Internal(8, address);
+    tlb_->InformTlbException(address);
+    TriggerException(ExceptionCause::kTlbMissLoad);
+    return 0;
   }
 
-  uint32_t fetched = bus_->Fetch(address);
-  if (fetched == 0xDEADBEEF) {
-    DumpProcessorLog();
-    PANIC("Fetch failed at {:08X}", address);
-  }
+  uint32_t fetched = bus_->Fetch(tlb_result.address_);
   return fetched;
 }
 
 LoadResult8 MipsBase::Load8(uint64_t address) {
+  MipsTlbTranslationResult tlb_result = tlb_->TranslateAddress(address);
+  if (!tlb_result.found_) {
+    cop_[0]->Write64Internal(8, address);
+    tlb_->InformTlbException(address);
+    TriggerException(ExceptionCause::kTlbMissLoad);
+    return LoadResult8{.has_value = false, .value = 0};
+  }
+
   if (config_.use_hook_) {
     for (auto& hook : hook_) {
       hook->OnLoad8(address);
     }
   }
 
-  LoadResult8 result = bus_->Load8(address);
+  LoadResult8 result = bus_->Load8(tlb_result.address_);
   if (!result.has_value) {
     fmt::print("PC: {:08X} | Load from unmapped address: {:08X}\n", pc_, address & 0xFFFFFFFF);
-    if (true) {
-      DumpProcessorLog();
-      PANIC("Load from unmapped address");
-    } else if (config_.has_cop0_) {
-      cop_[0]->Write64Internal(8, address);
-      TriggerException(ExceptionCause::kDbus);
-    }
+    DumpProcessorLog();
+    PANIC("Load from unmapped address");
   }
   return result;
 }
 
 LoadResult16 MipsBase::Load16(uint64_t address) {
+  MipsTlbTranslationResult tlb_result = tlb_->TranslateAddress(address);
+  if (!tlb_result.found_) {
+    cop_[0]->Write64Internal(8, address);
+    tlb_->InformTlbException(address);
+    TriggerException(ExceptionCause::kTlbMissLoad);
+    return LoadResult16{.has_value = false, .value = 0};
+  }
+
   if (config_.use_hook_) {
     for (auto& hook : hook_) {
       hook->OnLoad16(address);
     }
   }
 
-  LoadResult16 result = bus_->Load16(address);
+  LoadResult16 result = bus_->Load16(tlb_result.address_);
   if (!result.has_value) {
     fmt::print("PC: {:08X} | Load from unmapped address: {:08X}\n", pc_, address & 0xFFFFFFFF);
     DumpProcessorLog();
@@ -1087,13 +1112,21 @@ LoadResult16 MipsBase::Load16(uint64_t address) {
 }
 
 LoadResult32 MipsBase::Load32(uint64_t address) {
+  MipsTlbTranslationResult tlb_result = tlb_->TranslateAddress(address);
+  if (!tlb_result.found_) {
+    cop_[0]->Write64Internal(8, address);
+    tlb_->InformTlbException(address);
+    TriggerException(ExceptionCause::kTlbMissLoad);
+    return LoadResult32{.has_value = false, .value = 0};
+  }
+
   if (config_.use_hook_) {
     for (auto& hook : hook_) {
       hook->OnLoad32(address);
     }
   }
 
-  LoadResult32 result = bus_->Load32(address);
+  LoadResult32 result = bus_->Load32(tlb_result.address_);
   if (!result.has_value) {
     fmt::print("PC: {:08X} | Load from unmapped address: {:08X}\n", pc_, address & 0xFFFFFFFF);
     DumpProcessorLog();
@@ -1103,13 +1136,21 @@ LoadResult32 MipsBase::Load32(uint64_t address) {
 }
 
 LoadResult64 MipsBase::Load64(uint64_t address) {
+  MipsTlbTranslationResult tlb_result = tlb_->TranslateAddress(address);
+  if (!tlb_result.found_) {
+    cop_[0]->Write64Internal(8, address);
+    tlb_->InformTlbException(address);
+    TriggerException(ExceptionCause::kTlbMissLoad);
+    return LoadResult64{.has_value = false, .value = 0};
+  }
+
   if (config_.use_hook_) {
     for (auto& hook : hook_) {
       hook->OnLoad64(address);
     }
   }
 
-  LoadResult64 result = bus_->Load64(address);
+  LoadResult64 result = bus_->Load64(tlb_result.address_);
   if (!result.has_value) {
     fmt::print("PC: {:08X} | Load from unmapped address: {:08X}\n", pc_, address & 0xFFFFFFFF);
     DumpProcessorLog();
@@ -1120,6 +1161,20 @@ LoadResult64 MipsBase::Load64(uint64_t address) {
 
 void MipsBase::Store8(uint64_t address, uint8_t value) {
   if (config_.has_isolate_cache_bit_ && (cop_[0]->Read32Internal(12) & (1 << 16))) {
+    return;
+  }
+
+  MipsTlbTranslationResult tlb_result = tlb_->TranslateAddress(address);
+  if (!tlb_result.found_) {
+    cop_[0]->Write64Internal(8, address);
+    tlb_->InformTlbException(address);
+    TriggerException(ExceptionCause::kTlbMissStore);
+    return;
+  }
+  if (tlb_result.read_only_) {
+    cop_[0]->Write64Internal(8, address);
+    tlb_->InformTlbException(address);
+    TriggerException(ExceptionCause::kTlbMod);
     return;
   }
 
@@ -1145,7 +1200,7 @@ void MipsBase::Store8(uint64_t address, uint8_t value) {
     }
   }
 
-  bus_->Store8(address, value);
+  bus_->Store8(tlb_result.address_, value);
   if (kUseCachedInterp) {
     // InvalidateBlock(address);
   }
@@ -1153,6 +1208,20 @@ void MipsBase::Store8(uint64_t address, uint8_t value) {
 
 void MipsBase::Store16(uint64_t address, uint16_t value) {
   if (config_.has_isolate_cache_bit_ && (cop_[0]->Read32Internal(12) & (1 << 16))) {
+    return;
+  }
+
+  MipsTlbTranslationResult tlb_result = tlb_->TranslateAddress(address);
+  if (!tlb_result.found_) {
+    cop_[0]->Write64Internal(8, address);
+    tlb_->InformTlbException(address);
+    TriggerException(ExceptionCause::kTlbMissStore);
+    return;
+  }
+  if (tlb_result.read_only_) {
+    cop_[0]->Write64Internal(8, address);
+    tlb_->InformTlbException(address);
+    TriggerException(ExceptionCause::kTlbMod);
     return;
   }
 
@@ -1178,7 +1247,7 @@ void MipsBase::Store16(uint64_t address, uint16_t value) {
     }
   }
 
-  bus_->Store16(address, value);
+  bus_->Store16(tlb_result.address_, value);
   if (kUseCachedInterp) {
     // InvalidateBlock(address);
   }
@@ -1186,6 +1255,20 @@ void MipsBase::Store16(uint64_t address, uint16_t value) {
 
 void MipsBase::Store32(uint64_t address, uint32_t value) {
   if (config_.has_isolate_cache_bit_ && (cop_[0]->Read32Internal(12) & (1 << 16))) {
+    return;
+  }
+
+  MipsTlbTranslationResult tlb_result = tlb_->TranslateAddress(address);
+  if (!tlb_result.found_) {
+    cop_[0]->Write64Internal(8, address);
+    tlb_->InformTlbException(address);
+    TriggerException(ExceptionCause::kTlbMissStore);
+    return;
+  }
+  if (tlb_result.read_only_) {
+    cop_[0]->Write64Internal(8, address);
+    tlb_->InformTlbException(address);
+    TriggerException(ExceptionCause::kTlbMod);
     return;
   }
 
@@ -1211,14 +1294,28 @@ void MipsBase::Store32(uint64_t address, uint32_t value) {
     }
   }
 
-  bus_->Store32(address, value);
+  bus_->Store32(tlb_result.address_, value);
   if (kUseCachedInterp) {
-    InvalidateBlock(address);
+    InvalidateBlock(tlb_result.address_);
   }
 }
 
 void MipsBase::Store64(uint64_t address, uint64_t value) {
   if (config_.has_isolate_cache_bit_ && (cop_[0]->Read32Internal(12) & (1 << 16))) {
+    return;
+  }
+
+  MipsTlbTranslationResult tlb_result = tlb_->TranslateAddress(address);
+  if (!tlb_result.found_) {
+    cop_[0]->Write64Internal(8, address);
+    tlb_->InformTlbException(address);
+    TriggerException(ExceptionCause::kTlbMissStore);
+    return;
+  }
+  if (tlb_result.read_only_) {
+    cop_[0]->Write64Internal(8, address);
+    tlb_->InformTlbException(address);
+    TriggerException(ExceptionCause::kTlbMod);
     return;
   }
 
@@ -1228,7 +1325,7 @@ void MipsBase::Store64(uint64_t address, uint64_t value) {
     }
   }
 
-  bus_->Store64(address, value);
+  bus_->Store64(tlb_result.address_, value);
   if (kUseCachedInterp) {
     // InvalidateBlock(address);
   }

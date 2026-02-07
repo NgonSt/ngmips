@@ -6,6 +6,7 @@
 #include "bus_base.h"
 #include "mips_cache.h"
 #include "mips_cop.h"
+#include "mips_tlb.h"
 #include "mips_hook.h"
 
 typedef __int128_t int128_t;
@@ -16,6 +17,9 @@ const int kMipsInstLogCount = 2048;
 
 enum class ExceptionCause {
   kInt = 0,
+  kTlbMod = 1,
+  kTlbMissLoad = 2,
+  kTlbMissStore = 3,
   kAddrl = 4,
   kAddrs = 5,
   kIbus = 6,
@@ -50,6 +54,7 @@ struct MipsConfig {
   bool has_exception_;            // RSP doesn't have exception
   bool allow_misaligned_access_;  // RSP allows misaligned memory access
   bool has_cop0_;                 // RSP doesn't have conventional cop0
+  bool has_tlb_; 
   bool has_fpu_;
   bool has_isolate_cache_bit_;     // for PSX
   uint8_t cop_decoding_override_;  // if (x & cop_id), redirect lwc/swc/mfc/mtc/cfc/ctc -> cop
@@ -82,6 +87,7 @@ class MipsBase {
   void ClearCompareInterrupt();
   void CheckInterrupt();
   MipsCopBase* GetCop(int idx) { return cop_[idx].get(); };
+  MipsTlbBase* GetTlb() { return tlb_.get(); };
   MipsCache& GetMipsCache() { return cache_; };
   void DumpProcessorLog();
 
@@ -257,5 +263,6 @@ class MipsBase {
  protected:
   std::shared_ptr<BusBase> bus_;
   std::shared_ptr<MipsCopBase> cop_[4];
+  std::shared_ptr<MipsTlbBase> tlb_;
   MipsConfig config_;
 };

@@ -5,17 +5,29 @@
 #include "mips_base.h"
 #include "panic.h"
 
+namespace {
+
 const bool kLogCop = false;
 
+uint32_t xorshift_state = 1;
+
+void init_xorshift(uint32_t seed) {
+  xorshift_state = 1;
+}
+
+uint32_t xorshift() {
+  xorshift_state ^= xorshift_state << 13;
+  xorshift_state ^= xorshift_state >> 17;
+  xorshift_state ^= xorshift_state << 5;
+  return xorshift_state;
+}
+
+}  // namespace
+
 MipsCop0::MipsCop0() {
-  index_ = 0;
-  entrylo0_ = 0;
-  entrylo1_ = 0;
   context_ = 0;
-  page_mask_ = 0;
   wired_ = 0;
   badvaddr_ = 0;
-  entryhi_ = 0;
   compare_ = 0;
   sr_ = 0x34000000;
   cause_ = 0xB000007C;
@@ -31,14 +43,9 @@ void MipsCop0::ConnectCpu(MipsBase* cpu) {
 }
 
 void MipsCop0::Reset() {
-  index_ = 0;
-  entrylo0_ = 0;
-  entrylo1_ = 0;
   context_ = 0;
-  page_mask_ = 0;
   wired_ = 0;
   badvaddr_ = 0;
-  entryhi_ = 0;
   compare_ = 0;
   sr_ = 0x34000000;
   cause_ = 0xB000007C;
@@ -51,15 +58,36 @@ void MipsCop0::Reset() {
 
 void MipsCop0::Command(uint32_t command) {
   switch (command & 0x3F) {
-    case 0x01:
+    case 0x01: {
       // TLBR
+      MipsTlbBase* tlb = cpu_->GetTlb();
+      const MipsTlbEntry& entry = tlb->GetTlbEntry(tlb->GetIndex() & 31);
+      tlb->SetEntryLo0(entry.entry_lo0_);
+      tlb->SetEntryLo1(entry.entry_lo1_);
+      tlb->SetEntryHi(entry.entry_hi_);
+      tlb->SetPageMask(entry.page_mask_);
       break;
-    case 0x02:
+    }
+    case 0x02: {
       // TLBWI
+      MipsTlbBase* tlb = cpu_->GetTlb();
+      MipsTlbEntry entry(tlb->GetEntryLo0(), tlb->GetEntryLo1(), tlb->GetEntryHi(), tlb->GetPageMask());
+      tlb->SetTlbEntry(tlb->GetIndex() & 31, entry);
       break;
-    case 0x08:
+    }
+    case 0x06: {
+      // TLBWR
+      MipsTlbBase* tlb = cpu_->GetTlb();
+      MipsTlbEntry entry(tlb->GetEntryLo0(), tlb->GetEntryLo1(), tlb->GetEntryHi(), tlb->GetPageMask());
+      tlb->SetTlbEntry(Read32(1) & 31, entry);
+      break;
+    }
+    case 0x08: {
       // TLBP
+      MipsTlbBase* tlb = cpu_->GetTlb();
+      tlb->SetIndex(tlb->ProbeTlbEntry());
       break;
+    }
     case 0x10: {
       if (kLogCop) {
         fmt::print("RFE\n");
@@ -92,19 +120,26 @@ void MipsCop0::Command(uint32_t command) {
 }
 
 uint32_t MipsCop0::Read32(int idx) {
+  MipsTlbBase* tlb = cpu_->GetTlb();
   switch (idx) {
     case 0:
-      return index_;
+      return tlb->GetIndex();
     case 1:
-      return wired_;
+      // NOTE: in theory, one can get REALLY unlucky...
+      while (1) {
+        uint32_t rn = xorshift() & 0x1F;
+        if (rn >= wired_) {
+          return rn;
+        }
+      }
     case 2:
-      return entrylo0_;
+      return tlb->GetEntryLo0();
     case 3:
-      return entrylo1_;
+      return tlb->GetEntryLo1();
     case 4:
       return context_;
     case 5:
-      return page_mask_;
+      return tlb->GetPageMask();
     case 6:
       return wired_;
     case 8:
@@ -112,7 +147,7 @@ uint32_t MipsCop0::Read32(int idx) {
     case 9:
       return GetCount();
     case 10:
-      return entryhi_;
+      return tlb->GetEntryHi();
     case 11:
       return compare_;
     case 12:
@@ -133,24 +168,25 @@ uint32_t MipsCop0::Read32(int idx) {
 }
 
 void MipsCop0::Write32(int idx, uint32_t value) {
+  MipsTlbBase* tlb = cpu_->GetTlb();
   if (kLogCop) {
     fmt::print("COP0 write: {}, {:08X}\n", idx, value);
   }
   switch (idx) {
     case 0:
-      index_ = value & 0x3F;
+      tlb->SetIndex(value);
       break;
     case 2:
-      entrylo0_ = value;
+      tlb->SetEntryLo0(value);
       break;
     case 3:
-      entrylo1_ = value;
+      tlb->SetEntryLo1(value );
       break;
     case 4:
-      context_ = value;
+      context_ = value & 0xFFFFFFF0;
       break;
     case 5:
-      page_mask_ = value;
+      tlb->SetPageMask(value);
       break;
     case 6:
       wired_ = value;
@@ -164,10 +200,9 @@ void MipsCop0::Write32(int idx, uint32_t value) {
       WriteCount(value);
       break;
     case 10:
-      entryhi_ = value;
+      tlb->SetEntryHi(value);
       break;
     case 11:
-      fmt::print("Write to compare: {:08X} | count: {:08X}\n", value, GetCount());
       compare_ = value;
       surpress_compare_interrupt_ = true;
       cpu_->ClearCompareInterrupt();
@@ -200,19 +235,25 @@ void MipsCop0::Write32(int idx, uint32_t value) {
 }
 
 uint64_t MipsCop0::Read64(int idx) {
+  MipsTlbBase* tlb = cpu_->GetTlb();
   switch (idx) {
     case 0:
-      return index_;
+      return tlb->GetIndex();
     case 1:
-      return wired_;
+      while (1) {
+        uint32_t rn = xorshift() & 0x1F;
+        if (rn >= wired_) {
+          return rn;
+        }
+      }
     case 2:
-      return entrylo0_;
+      return tlb->GetEntryLo0();
     case 3:
-      return entrylo1_;
+      return tlb->GetEntryLo1();
     case 4:
       return context_;
     case 5:
-      return page_mask_;
+      return tlb->GetPageMask();
     case 6:
       return wired_;
     case 8:
@@ -220,7 +261,7 @@ uint64_t MipsCop0::Read64(int idx) {
     case 9:
       return GetCount();
     case 10:
-      return entryhi_;
+      return tlb->GetEntryHi();
     case 11:
       return compare_;
     case 12:
@@ -241,24 +282,25 @@ uint64_t MipsCop0::Read64(int idx) {
 }
 
 void MipsCop0::Write64(int idx, uint64_t value) {
+  MipsTlbBase* tlb = cpu_->GetTlb();
   if (kLogCop) {
     fmt::print("COP0 write: {}, {:08X}\n", idx, value);
   }
   switch (idx) {
     case 0:
-      index_ = value & 0x3F;
+      tlb->SetIndex(value);
       break;
     case 2:
-      entrylo0_ = value;
+      tlb->SetEntryLo0(value);
       break;
     case 3:
-      entrylo1_ = value;
+      tlb->SetEntryLo1(value);
       break;
     case 4:
       context_ = value;
       break;
     case 5:
-      page_mask_ = value;
+      tlb->SetPageMask(value);
       break;
     case 6:
       wired_ = value;
@@ -270,7 +312,7 @@ void MipsCop0::Write64(int idx, uint64_t value) {
       WriteCount(value);
       break;
     case 10:
-      entryhi_ = value;
+      tlb->SetEntryHi(value);
       break;
     case 11:
       compare_ = value;
@@ -322,6 +364,9 @@ uint32_t MipsCop0::Read32Internal(int idx) {
       return 2;
     case 128:
       return CheckCompareInterrupt();
+    default:
+      fmt::print("Read32Internal unhadled: {}\n", idx);
+      break;
   }
   return 0;
 }
@@ -344,6 +389,9 @@ void MipsCop0::Write32Internal(int idx, uint32_t value) {
     case 30:
       error_epc_ = value;
       break;
+    default:
+      PANIC("Write32Internal unhadled: {}\n", idx);
+      break;
   }
 }
 
@@ -359,6 +407,9 @@ uint64_t MipsCop0::Read64Internal(int idx) {
       return epc_;
     case 15:
       return 2;
+    default:
+      fmt::print("Read64Internal unhadled: {}\n", idx);
+      break;
   }
   return 0;
 }
@@ -380,6 +431,9 @@ void MipsCop0::Write64Internal(int idx, uint64_t value) {
     case 30:
       error_epc_ = value;
       break;
+    default:
+      PANIC("Write64Internal unhadled: {}\n", idx);
+      break;
   }
 }
 
@@ -394,7 +448,7 @@ bool MipsCop0::CheckCompareInterrupt() {
     last_compare_check_timestamp_ = timestamp;
     return false;
   }
-  
+
   if (last_compare_check_timestamp_ > timestamp) {
     fmt::print("Time went backwards\n");
     last_compare_check_timestamp_ = timestamp;
@@ -407,7 +461,7 @@ bool MipsCop0::CheckCompareInterrupt() {
   }
   bool result = false;
   if (true) {
-    uint32_t count = last_compare_check_timestamp_ - count_start_timestamp_;;
+    uint32_t count = last_compare_check_timestamp_ - count_start_timestamp_;
     // FIXME: THIS IS SO SLOW
     for (int i = 0; i < delta; i++) {
       count++;
