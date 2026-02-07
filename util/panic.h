@@ -6,6 +6,7 @@
 #define PANIC(...)                            \
   fmt::print("{}:{} | ", __LINE__, __FILE__); \
   fmt::print(__VA_ARGS__);                            \
+  fmt::print("\n");                           \
   fflush(stdout);                             \
   fflush(stderr);                             \
   raise(SIGABRT)
