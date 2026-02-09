@@ -2461,7 +2461,7 @@ void MipsBase::InstDdiv(uint32_t opcode) {
   int64_t rt_value = ReadGpr64(inst.rt());
   int64_t hi = 0;
   int64_t lo = 0;
-  bool rs_msb = (rs_value & (1ULL << 63)) == 0;
+  bool rs_msb = rs_value & (1ULL << 63);
   if (rt_value == 0) {
     hi = rs_value;
     lo = rs_msb ? 1 : 0xFFFFFFFFFFFFFFFFULL;
