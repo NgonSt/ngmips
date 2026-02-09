@@ -1,5 +1,4 @@
 #pragma once
-#include <stdfloat>
 
 #include "mips_cop.h"
 
@@ -28,6 +27,10 @@ class MipsFpu : public MipsCopBase {
   void WriteF32(int idx, f32_t value);
   double ReadF64(int idx);
   void WriteF64(int idx, f64_t value);
+  uint32_t ReadI32(int idx);
+  void WriteI32(int idx, uint32_t value);
+  uint64_t ReadI64(int idx);
+  void WriteI64(int idx, uint64_t value);
   bool GetFr();
 
   void InstAdd(uint32_t opcode);

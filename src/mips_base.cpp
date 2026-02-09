@@ -495,6 +495,35 @@ void MipsBase::CheckInterrupt() {
 }
 
 void MipsBase::RunInst() {
+  if (false) {
+    uint32_t pc = pc_;
+
+    if (config_.has_cop0_) {
+      constexpr std::tuple<const char*, uint32_t, int> kFuncMap[] = {
+          {"osCreateThread", 0x80027ED0, 4},
+          {"osStartThread", 0x80032B50, 1},
+          {"osRecvMesg", 0x8002FEA0, 3},
+          {"osSendMesg", 0x80031D50, 3},
+      };
+      for (auto& [name, addr, arg_num] : kFuncMap) {
+        if (pc == addr) {
+          fmt::print("{} (ra = {:08X}) | ", name, ReadGpr32(31));
+          for (int i = 0; i < arg_num; i++) {
+            fmt::print("{:08X} ", ReadGpr32(4 + i));
+          }
+          fmt::print("\n");
+
+          if (name == "osCreateThread" || name == "osStartThread") {
+            uint32_t thread_addr = ReadGpr32(4);
+            uint32_t pc_offset = thread_addr + 0x118 + 4;
+            uint32_t thread_pc = Load32(pc_offset).value;
+            fmt::print("THREAD | pc = {:08X}\n", thread_pc);
+          }
+        }
+      }
+    }
+  }
+
   uint32_t opcode = Fetch(pc_);
   bool is_this_inst_bd = has_branch_delay_;
   if (has_branch_delay_) {
@@ -1519,7 +1548,7 @@ void MipsBase::InstNor(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   uint64_t rs_value = ReadGpr64(inst.rs());
   uint64_t rt_value = ReadGpr64(inst.rt());
-  uint64_t rd_value = 0xFFFFFFFFFFFFFFFFUL ^ (rs_value | rt_value);
+  uint64_t rd_value = 0xFFFFFFFFFFFFFFFFULL ^ (rs_value | rt_value);
   WriteGpr64(inst.rd(), rd_value);
 }
 
@@ -1766,16 +1795,17 @@ void MipsBase::InstBltzal(uint32_t opcode) {
 }
 
 void MipsBase::InstJ(uint32_t opcode) {
-  if (kEnableIdleLoopDetection && (opcode == 0x08009771)) {
+  JTypeInst inst = MipsInst(opcode).GetJType();
+  uint32_t dst = ((pc_ + 4) & 0xF0000000) | (inst.address() << 2);
+  Jump32(dst);
+
+  if (kEnableIdleLoopDetection && (dst == pc_)) {
     uint32_t delay_op = Fetch(pc_ + 4);
     if (delay_op == 0x00000000) {
       cycle_spent_ += 100;
       cycle_spent_total_ += 100;
     }
   }
-  JTypeInst inst = MipsInst(opcode).GetJType();
-  uint32_t dst = ((pc_ + 4) & 0xF0000000) | (inst.address() << 2);
-  Jump32(dst);
 }
 
 void MipsBase::InstJal(uint32_t opcode) {
@@ -2413,7 +2443,7 @@ void MipsBase::InstDmult(uint32_t opcode) {
   int128_t rt_signed = (int64_t)rt_value;
   int128_t result = rs_signed * rt_signed;
   hi_ = result >> 64;
-  lo_ = result & 0xFFFFFFFFFFFFFFFFUL;
+  lo_ = result & 0xFFFFFFFFFFFFFFFFULL;
 }
 
 void MipsBase::InstDmultu(uint32_t opcode) {
@@ -2422,7 +2452,7 @@ void MipsBase::InstDmultu(uint32_t opcode) {
   uint128_t rt_value = ReadGpr64(inst.rt());
   uint128_t result = rs_value * rt_value;
   hi_ = result >> 64;
-  lo_ = result & 0xFFFFFFFFFFFFFFFFUL;
+  lo_ = result & 0xFFFFFFFFFFFFFFFFULL;
 }
 
 void MipsBase::InstDdiv(uint32_t opcode) {
@@ -2431,13 +2461,13 @@ void MipsBase::InstDdiv(uint32_t opcode) {
   int64_t rt_value = ReadGpr64(inst.rt());
   int64_t hi = 0;
   int64_t lo = 0;
-  bool rs_msb = (rs_value & (1UL << 63)) == 0;
+  bool rs_msb = (rs_value & (1ULL << 63)) == 0;
   if (rt_value == 0) {
     hi = rs_value;
-    lo = rs_msb ? 1 : 0xFFFFFFFFFFFFFFFFUL;
-  } else if ((uint64_t)rs_value == 0x8000000000000000UL && (uint64_t)rt_value == 0xFFFFFFFFFFFFFFFFUL) {
+    lo = rs_msb ? 1 : 0xFFFFFFFFFFFFFFFFULL;
+  } else if ((uint64_t)rs_value == 0x8000000000000000ULL && (uint64_t)rt_value == 0xFFFFFFFFFFFFFFFFULL) {
     hi = 0;
-    lo = 0x8000000000000000UL;
+    lo = 0x8000000000000000ULL;
   } else {
     int64_t rs_signed = rs_value;
     int64_t rt_signed = rt_value;
@@ -2456,7 +2486,7 @@ void MipsBase::InstDdivu(uint32_t opcode) {
   uint64_t lo = 0;
   if (rt_value == 0) {
     hi = rs_value;
-    lo = 0xFFFFFFFFFFFFFFFFUL;
+    lo = 0xFFFFFFFFFFFFFFFFULL;
   } else {
     lo = rs_value / rt_value;
     hi = rs_value % rt_value;
@@ -2614,7 +2644,7 @@ void MipsBase::InstLdl(uint32_t opcode) {
   uint64_t address = rs_value + imm;
   uint64_t rt_value = ReadGpr64(inst.rt());
   int address_unalignment = address & 7;
-  uint64_t address_aligned = address & ~7UL;
+  uint64_t address_aligned = address & ~7ULL;
 
   if (config_.use_big_endian_) {
     address_unalignment = 7 - address_unalignment;
@@ -2624,7 +2654,7 @@ void MipsBase::InstLdl(uint32_t opcode) {
     LoadResult8 load_result = Load8(addr);
     if (load_result.has_value) {
       int shamt = (7 - i) * 8;
-      rt_value &= ~(0xFFUL << shamt);
+      rt_value &= ~(0xFFULL << shamt);
       rt_value |= (uint64_t)load_result.value << shamt;
     }
   }
@@ -2639,7 +2669,7 @@ void MipsBase::InstLdr(uint32_t opcode) {
   uint64_t address = rs_value + imm;
   uint64_t rt_value = ReadGpr64(inst.rt());
   int address_unalignment = address & 7;
-  uint64_t address_aligned = address & ~7UL;
+  uint64_t address_aligned = address & ~7ULL;
 
   address_unalignment = 7 - address_unalignment;
   if (config_.use_big_endian_) {
@@ -2650,7 +2680,7 @@ void MipsBase::InstLdr(uint32_t opcode) {
     LoadResult8 load_result = Load8(addr);
     if (load_result.has_value) {
       int shamt = i * 8;
-      rt_value &= ~(0xFFUL << shamt);
+      rt_value &= ~(0xFFULL << shamt);
       rt_value |= (uint64_t)load_result.value << shamt;
     }
   }

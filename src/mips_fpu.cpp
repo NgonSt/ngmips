@@ -1,5 +1,6 @@
 #include "mips_fpu.h"
 
+#include <cmath>
 #include <fmt/format.h>
 
 #include "mips_base.h"
@@ -25,12 +26,12 @@ class FpuRTypeInst {
 };
 
 template <class T>
-bool compare(uint32_t opcode, T ft, T fs) {
+bool compare(uint32_t opcode, T fs, T ft) {
   uint8_t cond = opcode & 0x7;
   bool allow_unordered = opcode & 0x8;
-  bool gt = ft > fs;   // Greater Than
-  bool lt = ft < fs;   // Less than
-  bool eq = ft == fs;  // Equal
+  bool gt = fs > ft;   // Greater Than
+  bool lt = fs < ft;   // Less than
+  bool eq = fs == ft;  // Equal
   bool un = false;     // Unordered
 
   bool result = false;
@@ -69,31 +70,29 @@ bool compare(uint32_t opcode, T ft, T fs) {
 }
 
 int64_t round_f32(f32_t value, int rm) {
-  int64_t result;
   switch (rm) {
     case 0:
-      return nearbyintf32(value);
+      return nearbyintf(value);
     case 1:
-      return truncf32(value);
+      return truncf(value);
     case 2:
-      return ceilf32(value);
+      return ceilf(value);
     case 3:
-      return floorf32(value);
+      return floorf(value);
   }
   return 0;
 }
 
 int64_t round_f64(f64_t value, int rm) {
-  int64_t result;
   switch (rm) {
     case 0:
-      return nearbyintf64(value);
+      return nearbyint(value);
     case 1:
-      return truncf64(value);
+      return trunc(value);
     case 2:
-      return ceilf64(value);
+      return ceil(value);
     case 3:
-      return floorf64(value);
+      return floor(value);
   }
   return 0;
 }
@@ -257,23 +256,62 @@ bool MipsFpu::GetFlag() {
 }
 
 float MipsFpu::ReadF32(int idx) {
-  uint32_t value = Read32(idx);
+  uint32_t value = ReadI32(idx);
   return *reinterpret_cast<f32_t*>(&value);
 }
 
 void MipsFpu::WriteF32(int idx, f32_t value) {
   uint32_t i = *reinterpret_cast<uint32_t*>(&value);
-  Write32(idx, i);
+  WriteI32(idx, i);
 }
 
 double MipsFpu::ReadF64(int idx) {
-  uint64_t value = Read64(idx);
+  uint64_t value = ReadI64(idx);
   return *reinterpret_cast<f64_t*>(&value);
 }
 
 void MipsFpu::WriteF64(int idx, f64_t value) {
   uint64_t i = *reinterpret_cast<uint64_t*>(&value);
-  Write64(idx, i);
+  WriteI64(idx, i);
+}
+
+uint32_t MipsFpu::ReadI32(int idx) {
+  if (GetFr()) {
+    return static_cast<uint32_t>(fpr_[idx]);
+  }
+
+  int phys = idx & ~1;
+  if (idx & 1) {
+    return static_cast<uint32_t>(fpr_[phys] >> 32);
+  }
+  return static_cast<uint32_t>(fpr_[phys]);
+}
+
+void MipsFpu::WriteI32(int idx, uint32_t value) {
+  if (GetFr()) {
+    fpr_[idx] = value;
+  } else {
+    int phys = idx & ~1;
+    if (idx & 1) {
+      fpr_[phys] = (fpr_[phys] & 0x00000000FFFFFFFF) | (static_cast<uint64_t>(value) << 32);
+    } else {
+      fpr_[phys] = (fpr_[phys] & 0xFFFFFFFF00000000) | value;
+    }
+  }
+}
+
+uint64_t MipsFpu::ReadI64(int idx) {
+  if (!GetFr()) {
+    idx &= ~1;
+  }
+  return fpr_[idx];
+}
+
+void MipsFpu::WriteI64(int idx, uint64_t value) {
+  if (!GetFr()) {
+    idx &= ~1;
+  }
+  fpr_[idx] = value;
 }
 
 bool MipsFpu::GetFr() {
@@ -378,13 +416,13 @@ void MipsFpu::InstSqrt(uint32_t opcode) {
   switch (inst.fmt()) {
     case 16: {
       f32_t fs_value = ReadF32(inst.fs());
-      f32_t fd_value = sqrtf32(fs_value);
+      f32_t fd_value = sqrtf(fs_value);
       WriteF32(inst.fd(), fd_value);
       break;
     }
     case 17: {
       f64_t fs_value = ReadF64(inst.fs());
-      f64_t fd_value = sqrtf64(fs_value);
+      f64_t fd_value = sqrt(fs_value);
       WriteF64(inst.fd(), fd_value);
       break;
     }
@@ -399,13 +437,13 @@ void MipsFpu::InstAbs(uint32_t opcode) {
   switch (inst.fmt()) {
     case 16: {
       f32_t fs_value = ReadF32(inst.fs());
-      f32_t fd_value = fabsf32(fs_value);
+      f32_t fd_value = fabsf(fs_value);
       WriteF32(inst.fd(), fd_value);
       break;
     }
     case 17: {
       f64_t fs_value = ReadF64(inst.fs());
-      f64_t fd_value = fabsf64(fs_value);
+      f64_t fd_value = fabs(fs_value);
       WriteF64(inst.fd(), fd_value);
       break;
     }
@@ -460,14 +498,14 @@ void MipsFpu::InstRoundL(uint32_t opcode) {
   switch (inst.fmt()) {
     case 16: {
       f32_t fs_value = ReadF32(inst.fs());
-      int64_t fd_value = roundf32(fs_value);
-      Write64(inst.fd(), fd_value);
+      int64_t fd_value = roundf(fs_value);
+      WriteI64(inst.fd(), fd_value);
       break;
     }
     case 17: {
       f64_t fs_value = ReadF64(inst.fs());
-      int64_t fd_value = roundf64(fs_value);
-      Write64(inst.fd(), fd_value);
+      int64_t fd_value = round(fs_value);
+      WriteI64(inst.fd(), fd_value);
       break;
     }
     default:
@@ -481,14 +519,14 @@ void MipsFpu::InstTruncL(uint32_t opcode) {
   switch (inst.fmt()) {
     case 16: {
       f32_t fs_value = ReadF32(inst.fs());
-      int64_t fd_value = truncf32(fs_value);
-      Write64(inst.fd(), fd_value);
+      int64_t fd_value = truncf(fs_value);
+      WriteI64(inst.fd(), fd_value);
       break;
     }
     case 17: {
       f64_t fs_value = ReadF64(inst.fs());
-      int64_t fd_value = truncf64(fs_value);
-      Write64(inst.fd(), fd_value);
+      int64_t fd_value = trunc(fs_value);
+      WriteI64(inst.fd(), fd_value);
       break;
     }
     default:
@@ -502,14 +540,14 @@ void MipsFpu::InstCeilL(uint32_t opcode) {
   switch (inst.fmt()) {
     case 16: {
       f32_t fs_value = ReadF32(inst.fs());
-      int64_t fd_value = ceilf32(fs_value);
-      Write64(inst.fd(), fd_value);
+      int64_t fd_value = ceilf(fs_value);
+      WriteI64(inst.fd(), fd_value);
       break;
     }
     case 17: {
       f64_t fs_value = ReadF64(inst.fs());
-      int64_t fd_value = ceilf64(fs_value);
-      Write64(inst.fd(), fd_value);
+      int64_t fd_value = ceil(fs_value);
+      WriteI64(inst.fd(), fd_value);
       break;
     }
     default:
@@ -523,14 +561,14 @@ void MipsFpu::InstFloorL(uint32_t opcode) {
   switch (inst.fmt()) {
     case 16: {
       f32_t fs_value = ReadF32(inst.fs());
-      int64_t fd_value = floorf32(fs_value);
-      Write64(inst.fd(), fd_value);
+      int64_t fd_value = floorf(fs_value);
+      WriteI64(inst.fd(), fd_value);
       break;
     }
     case 17: {
       f64_t fs_value = ReadF64(inst.fs());
-      int64_t fd_value = floorf64(fs_value);
-      Write64(inst.fd(), fd_value);
+      int64_t fd_value = floor(fs_value);
+      WriteI64(inst.fd(), fd_value);
       break;
     }
     default:
@@ -544,14 +582,14 @@ void MipsFpu::InstRoundW(uint32_t opcode) {
   switch (inst.fmt()) {
     case 16: {
       f32_t fs_value = ReadF32(inst.fs());
-      int32_t fd_value = roundf32(fs_value);
-      Write32(inst.fd(), fd_value);
+      int32_t fd_value = roundf(fs_value);
+      WriteI32(inst.fd(), fd_value);
       break;
     }
     case 17: {
       f64_t fs_value = ReadF64(inst.fs());
-      int32_t fd_value = roundf64(fs_value);
-      Write32(inst.fd(), fd_value);
+      int32_t fd_value = round(fs_value);
+      WriteI32(inst.fd(), fd_value);
       break;
     }
     default:
@@ -565,14 +603,14 @@ void MipsFpu::InstTruncW(uint32_t opcode) {
   switch (inst.fmt()) {
     case 16: {
       f32_t fs_value = ReadF32(inst.fs());
-      int32_t fd_value = truncf32(fs_value);
-      Write32(inst.fd(), fd_value);
+      int32_t fd_value = truncf(fs_value);
+      WriteI32(inst.fd(), fd_value);
       break;
     }
     case 17: {
       f64_t fs_value = ReadF64(inst.fs());
-      int32_t fd_value = truncf64(fs_value);
-      Write32(inst.fd(), fd_value);
+      int32_t fd_value = trunc(fs_value);
+      WriteI32(inst.fd(), fd_value);
       break;
     }
     default:
@@ -586,14 +624,14 @@ void MipsFpu::InstCeilW(uint32_t opcode) {
   switch (inst.fmt()) {
     case 16: {
       f32_t fs_value = ReadF32(inst.fs());
-      int32_t fd_value = ceilf32(fs_value);
-      Write32(inst.fd(), fd_value);
+      int32_t fd_value = ceilf(fs_value);
+      WriteI32(inst.fd(), fd_value);
       break;
     }
     case 17: {
       f64_t fs_value = ReadF64(inst.fs());
-      int32_t fd_value = ceilf64(fs_value);
-      Write32(inst.fd(), fd_value);
+      int32_t fd_value = ceil(fs_value);
+      WriteI32(inst.fd(), fd_value);
       break;
     }
     default:
@@ -607,14 +645,14 @@ void MipsFpu::InstFloorW(uint32_t opcode) {
   switch (inst.fmt()) {
     case 16: {
       f32_t fs_value = ReadF32(inst.fs());
-      int32_t fd_value = floorf32(fs_value);
-      Write32(inst.fd(), fd_value);
+      int32_t fd_value = floorf(fs_value);
+      WriteI32(inst.fd(), fd_value);
       break;
     }
     case 17: {
       f64_t fs_value = ReadF64(inst.fs());
-      int32_t fd_value = floorf64(fs_value);
-      Write32(inst.fd(), fd_value);
+      int32_t fd_value = floor(fs_value);
+      WriteI32(inst.fd(), fd_value);
       break;
     }
     default:
@@ -633,13 +671,13 @@ void MipsFpu::InstCvtS(uint32_t opcode) {
       break;
     }
     case 20: {
-      int32_t fs_value = Read32(inst.fs());
+      int32_t fs_value = ReadI32(inst.fs());
       f32_t fd_value = fs_value;
       WriteF32(inst.fd(), fd_value);
       break;
     }
     case 21: {
-      int64_t fs_value = Read64(inst.fs());
+      int64_t fs_value = ReadI64(inst.fs());
       f32_t fd_value = fs_value;
       WriteF32(inst.fd(), fd_value);
       break;
@@ -660,13 +698,13 @@ void MipsFpu::InstCvtD(uint32_t opcode) {
       break;
     }
     case 20: {
-      int32_t fs_value = Read32(inst.fs());
+      int32_t fs_value = ReadI32(inst.fs());
       f64_t fd_value = fs_value;
       WriteF64(inst.fd(), fd_value);
       break;
     }
     case 21: {
-      int64_t fs_value = Read64(inst.fs());
+      int64_t fs_value = ReadI64(inst.fs());
       f64_t fd_value = fs_value;
       WriteF64(inst.fd(), fd_value);
       break;
@@ -683,13 +721,13 @@ void MipsFpu::InstCvtW(uint32_t opcode) {
     case 16: {
       f32_t fs_value = ReadF32(inst.fs());
       int32_t fd_value = round_f32(fs_value, fcr31_ & 0x3);
-      Write32(inst.fd(), fd_value);
+      WriteI32(inst.fd(), fd_value);
       break;
     }
     case 17: {
       f64_t fs_value = ReadF64(inst.fs());
       int32_t fd_value = round_f64(fs_value, fcr31_ & 0x3);
-      Write32(inst.fd(), fd_value);
+      WriteI32(inst.fd(), fd_value);
       break;
     }
     default:
@@ -704,13 +742,13 @@ void MipsFpu::InstCvtL(uint32_t opcode) {
     case 16: {
       f32_t fs_value = ReadF32(inst.fs());
       int64_t fd_value = round_f32(fs_value, fcr31_ & 0x3);
-      Write64(inst.fd(), fd_value);
+      WriteI64(inst.fd(), fd_value);
       break;
     }
     case 17: {
       f64_t fs_value = ReadF64(inst.fs());
       int64_t fd_value = round_f64(fs_value, fcr31_ & 0x3);
-      Write64(inst.fd(), fd_value);
+      WriteI64(inst.fd(), fd_value);
       break;
     }
     default:
