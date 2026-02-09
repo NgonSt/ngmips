@@ -468,7 +468,7 @@ void MipsBase::CheckInterrupt() {
   uint32_t cause = cop_[0]->Read32Internal(13);
 
   uint8_t ip = (cause >> 8) & 3;
-  ip |= bus_->GetInterrupt() ? (1 << 3) : 0;
+  ip |= bus_->GetInterrupt() ? (1 << 2) : 0;
   ip |= compare_interrupt_ ? (1 << 7) : 0;
 
   uint8_t im = sr >> 8;
@@ -1589,7 +1589,7 @@ void MipsBase::InstSllv(uint32_t opcode) {
 
 void MipsBase::InstSra(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
-  // NOTE: This is actually incorrect for VR4300
+  // NOTE: This is actually incorrect for VR4300. It shifts 64bit value, making upper 32bit of rt relavant
   int32_t rt_value = ReadGpr32(inst.rt());
   int32_t rd_value = rt_value >> inst.shamt();
   WriteGpr32Sext(inst.rd(), rd_value);
