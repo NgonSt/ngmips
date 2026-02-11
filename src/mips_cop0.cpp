@@ -460,7 +460,7 @@ bool MipsCop0::CheckCompareInterrupt() {
     return false;
   }
   bool result = false;
-  if (true) {
+  if (false) {
     uint32_t count = last_compare_check_timestamp_ - count_start_timestamp_;
     // FIXME: THIS IS SO SLOW
     for (int i = 0; i < delta; i++) {

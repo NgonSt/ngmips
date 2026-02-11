@@ -9,17 +9,7 @@ constexpr uint64_t kPhysicalUnmappedAddress = 0xFFFFFFFFFFFFFFFFUL;
 uint64_t calculate_physical_address_psx(uint64_t address) {
   address &= 0xFFFFFFFF;
 
-  bool is_valid_kuseg = address < 0x20000000;
-  bool is_unmapped_kuseg = (address >= 0x20000000) && (address < 0x80000000);
-  bool is_kseg0 = (address >= 0x80000000) && (address < 0xA0000000);
-  bool is_kseg1 = (address >= 0xA0000000) && (address < 0xC0000000);
-  bool is_kseg2 = address >= 0xC0000000;
-  if (is_unmapped_kuseg || is_kseg2) {
-    return kPhysicalUnmappedAddress;
-  }
-
-  uint32_t address_mapped = address & 0x1FFFFFFC;
-  return address_mapped;
+  return kPhysicalUnmappedAddress;
 }
 
 }  // namespace
@@ -43,14 +33,23 @@ void MipsCache::Reset() {
   }
 }
 
-MipsCacheBlock* MipsCache::GetBlock(uint64_t address) {
-  address = calculate_physical_address_psx(address);
-  if (!kUseCachedInterp) {
-    return nullptr;
-  }
+void MipsCache::ConnectTlb(std::shared_ptr<MipsTlbBase> tlb) {
+  tlb_ = tlb;
+}
 
-  if (address == kPhysicalUnmappedAddress) {
-    return nullptr;
+MipsCacheBlock* MipsCache::GetBlock(uint64_t address) {
+  // Fast path for kseg0/kseg1: avoid virtual TLB call
+  address &= 0xFFFFFFFF;
+  bool is_kseg0 = address >= 0x80000000 && address < 0xA0000000;
+  bool is_kseg1 = address >= 0xA0000000 && address < 0xC0000000;
+  if (is_kseg0 || is_kseg1) {
+    address = address & 0x1FFFFFFF;
+  } else {
+    MipsTlbTranslationResult result = tlb_->TranslateAddress(address);
+    if (!result.found_) {
+      return nullptr;
+    }
+    address = result.address_;
   }
 
   // Check multi-entry lookup cache (linear search is fast for small sizes)
@@ -74,25 +73,22 @@ MipsCacheBlock* MipsCache::GetBlock(uint64_t address) {
 }
 
 MipsCacheBlock* MipsCache::GetOverlappingEntry(uint64_t address) {
-  address = calculate_physical_address_psx(address);
-  if (!kUseCachedInterp) {
+  MipsTlbTranslationResult result = tlb_->TranslateAddress(address);
+  if (!result.found_) {
     return nullptr;
   }
+  address = result.address_;
 
   return nullptr;
 }
 
 void MipsCache::InsertBlock(const MipsCacheBlock& block) {
-  if (!kUseCachedInterp) {
-    return;
-  }
-
   MipsCacheBlock block_copy = block;
-  block_copy.start_ = calculate_physical_address_psx(block_copy.start_);
-
-  if (block_copy.start_ == kPhysicalUnmappedAddress) {
+  MipsTlbTranslationResult result = tlb_->TranslateAddress(block_copy.start_);
+  if (!result.found_) {
     return;
   }
+  block_copy.start_ = result.address_;
 
   cache_.insert(std::make_pair(block_copy.start_, block_copy));
 
@@ -104,14 +100,11 @@ void MipsCache::InsertBlock(const MipsCacheBlock& block) {
 }
 
 void MipsCache::InvalidateBlock(uint64_t address) {
-  if (!kUseCachedInterp) {
+  MipsTlbTranslationResult result = tlb_->TranslateAddress(address);
+  if (!result.found_) {
     return;
   }
-  address = calculate_physical_address_psx(address);
-
-  if (address == kPhysicalUnmappedAddress) {
-    return;
-  }
+  address = result.address_;
 
   bool is_in_cache = cache_.find(address) != cache_.end();
   if (is_in_cache) {
@@ -135,6 +128,20 @@ void MipsCache::InvalidateBlock(uint64_t address) {
 }
 
 void MipsCache::InvalidateBlockRange(uint64_t start, uint64_t end) {
+  MipsTlbTranslationResult result = tlb_->TranslateAddress(start);
+  if (!result.found_) {
+    return;
+  }
+  uint64_t phys_start = result.address_;
+  uint64_t phys_end = phys_start + (end - start);
+
+  auto it = cache_.begin();
+  while (it != cache_.end()) {
+    if (it->second.start_ < phys_end && it->second.end_ > phys_start) {
+      pending_invalidations_.insert(it->second.start_);
+    }
+    ++it;
+  }
 }
 
 void MipsCache::QueueCacheClear() {

@@ -315,6 +315,7 @@ void MipsFpu::WriteI64(int idx, uint64_t value) {
 }
 
 bool MipsFpu::GetFr() {
+  return false;
   bool fr = cpu_->GetCop(0)->Read32Internal(12) & (1 << 26);
   return fr;
 }

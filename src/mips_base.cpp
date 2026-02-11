@@ -146,6 +146,8 @@ MipsBase::MipsBase() {
   }
   hook_[0] = std::make_shared<MipsHookDummy>();
   hook_[1] = std::make_shared<MipsHookDummy>();
+
+  cache_.ConnectTlb(tlb_);
 }
 
 MipsBase::MipsBase(MipsConfig config) {
@@ -193,6 +195,8 @@ MipsBase::MipsBase(MipsConfig config) {
   }
   hook_[0] = std::make_shared<MipsHookDummy>();
   hook_[1] = std::make_shared<MipsHookDummy>();
+
+  cache_.ConnectTlb(tlb_);
 }
 
 MipsBase::~MipsBase() {
@@ -277,7 +281,7 @@ void MipsBase::Reset() {
 }
 
 int MipsBase::Run(int cycle) {
-  if (kUseCachedInterp) {
+  if (config_.use_cached_interpreter_) {
     return RunCached(cycle);
   }
   cycle_spent_ = 0;
@@ -304,6 +308,17 @@ int MipsBase::RunCached(int cycle) {
   cycle_spent_ = 0;
   while (cycle_spent_ < cycle) {
     CheckInterrupt();
+    CheckCompare();
+    if (halt_) {
+      if (cycle_spent_ < cycle) {
+        int delta = cycle - cycle_spent_;
+        cycle_spent_total_ += delta;
+        return cycle;
+      } else {
+        return cycle_spent_;
+      }
+    }
+
     const MipsCacheBlock* block = cache_.GetBlock(pc_);
     if (block == nullptr) {
       OnNewBlock(pc_);
@@ -316,7 +331,14 @@ int MipsBase::RunCached(int cycle) {
     const int length = block->length_;
     const MipsCacheEntry* entries = block->entries_;
 
+    int executed = 0;
     for (int i = 0; i < length; i++) {
+      // If a previous instruction (exception, branch-likely nullification)
+      // changed PC to outside this block, stop executing the block
+      if (i > 0 && pc_ != entries[i].address_) {
+        break;
+      }
+
       const uint32_t opcode = entries[i].opcode_;
       const uint32_t pc = entries[i].address_;
       const inst_ptr_t fp = entries[i].func_;
@@ -359,6 +381,7 @@ int MipsBase::RunCached(int cycle) {
       ExecuteDelayedLoad();
 
       pc_ = next_pc_ & 0xFFFFFFFF;
+      executed++;
     }
 
     if (kEnablePsxSpecific) {
@@ -366,7 +389,7 @@ int MipsBase::RunCached(int cycle) {
     }
     cache_.ExecuteCacheClear();
 
-    cpi_counter_ += block->cycle_;
+    cpi_counter_ += executed * config_.cpi_;
     int cpi_integer = cpi_counter_ >> 8;
     cpi_counter_ &= 0xFF;
     cycle_spent_ += cpi_integer;
@@ -1015,6 +1038,11 @@ void MipsBase::TriggerException(ExceptionCause cause) {
     if (cause == ExceptionCause::kTlbMod || cause == ExceptionCause::kTlbMissLoad || cause == ExceptionCause::kTlbMissStore) {
       vec_address_general = exl ? 0x80000180 : 0x80000000;
       fmt::print("TLB exception {} | BadVAddr = {:08X}\n", static_cast<int>(cause), cop_[0]->Read32Internal(8));
+      if (true) {
+        // TLB exception is likely a sign of something going wrong in N64. panic
+        DumpProcessorLog();
+        PANIC("TLB exception");
+      }
     }
     pc_ = vec_address_general;
     next_pc_ = pc_;
@@ -1230,7 +1258,7 @@ void MipsBase::Store8(uint64_t address, uint8_t value) {
   }
 
   bus_->Store8(tlb_result.address_, value);
-  if (kUseCachedInterp) {
+  if (config_.use_cached_interpreter_) {
     // InvalidateBlock(address);
   }
 }
@@ -1277,7 +1305,7 @@ void MipsBase::Store16(uint64_t address, uint16_t value) {
   }
 
   bus_->Store16(tlb_result.address_, value);
-  if (kUseCachedInterp) {
+  if (config_.use_cached_interpreter_) {
     // InvalidateBlock(address);
   }
 }
@@ -1324,8 +1352,8 @@ void MipsBase::Store32(uint64_t address, uint32_t value) {
   }
 
   bus_->Store32(tlb_result.address_, value);
-  if (kUseCachedInterp) {
-    InvalidateBlock(tlb_result.address_);
+  if (config_.use_cached_interpreter_) {
+    // InvalidateBlock(tlb_result.address_);
   }
 }
 
@@ -1355,7 +1383,7 @@ void MipsBase::Store64(uint64_t address, uint64_t value) {
   }
 
   bus_->Store64(tlb_result.address_, value);
-  if (kUseCachedInterp) {
+  if (config_.use_cached_interpreter_) {
     // InvalidateBlock(address);
   }
 }
@@ -1416,7 +1444,7 @@ void MipsBase::OnNewBlock(uint64_t address) {
 }
 
 void MipsBase::InvalidateBlock(uint64_t address) {
-  if (!kUseCachedInterp) {
+  if (!config_.use_cached_interpreter_) {
     return;
   }
 
@@ -2140,8 +2168,11 @@ void MipsBase::InstCop(uint32_t opcode) {
 
   uint32_t cop_command = opcode;
   cop_[cop_id]->Command(cop_command);
+
   if (kLazyInterruptPolling) {
-    if (cop_id == 0) {
+    uint8_t command_id = cop_command & 0x3F;
+    if (command_id == 0x10 || command_id == 0x18) {
+      // ERET or RFE
       CheckInterrupt();
     }
   }
@@ -2372,7 +2403,22 @@ void MipsBase::InstBltzall(uint32_t opcode) {
 }
 
 void MipsBase::InstCache(uint32_t opcode) {
-  // Do nothing
+  int16_t offset = opcode;
+  uint8_t op = (opcode >> 16) & 0x1F;
+  uint8_t base = (opcode >> 21) & 0x1F;
+  uint64_t base_value = ReadGpr64(base);
+  uint64_t address = base_value + offset;
+  bool is_dst_dcache = op & 1;
+  if (is_dst_dcache) {
+    return;
+  }
+
+  // I-cache operation: invalidate the 32-byte cache line containing this address
+  if (config_.use_cached_interpreter_) {
+    uint64_t line_start = address & ~0x1F;
+    uint64_t line_end = line_start + 32;
+    GetMipsCache().InvalidateBlockRange(line_start, line_end);
+  }
 }
 
 void MipsBase::InstDadd(uint32_t opcode) {

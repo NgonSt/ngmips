@@ -1,11 +1,13 @@
 #pragma once
-#include <cstdint>
 #include <ankerl/unordered_dense.h>
-#include <unordered_map>
-#include <set>
 
-const bool kUseCachedInterp = false;
-const int kCacheBlockMaxLength = 32;
+#include <cstdint>
+#include <set>
+#include <unordered_map>
+
+#include "mips_tlb.h"
+
+const int kCacheBlockMaxLength = 64;
 const int kLookupCacheSize = 4;
 
 class MipsBase;
@@ -29,6 +31,7 @@ class MipsCache {
  public:
   MipsCache();
   void Reset();
+  void ConnectTlb(std::shared_ptr<MipsTlbBase> tlb);
   MipsCacheBlock* GetBlock(uint64_t address);
   MipsCacheBlock* GetOverlappingEntry(uint64_t address);
   void InsertBlock(const MipsCacheBlock& block);
@@ -50,4 +53,6 @@ class MipsCache {
   };
   LookupCacheEntry lookup_cache_[kLookupCacheSize];
   int lookup_cache_index_;  // Round-robin insertion pointer
+
+  std::shared_ptr<MipsTlbBase> tlb_;
 };

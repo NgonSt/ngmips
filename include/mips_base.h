@@ -12,7 +12,7 @@
 typedef __int128_t int128_t;
 typedef __uint128_t uint128_t;
 
-const bool kLazyInterruptPolling = false && !kUseCachedInterp;
+const bool kLazyInterruptPolling = false;
 const int kMipsInstLogCount = 2048;
 
 enum class ExceptionCause {
@@ -60,6 +60,7 @@ struct MipsConfig {
   uint8_t cop_decoding_override_;  // if (x & cop_id), redirect lwc/swc/mfc/mtc/cfc/ctc -> cop
   bool use_hook_;
   uint16_t cpi_;  // u8.8 fixed point
+  bool use_cached_interpreter_;
 };
 
 class MipsBase {
