@@ -11,7 +11,7 @@ constexpr bool kAllowMips3Inst = true;
 MipsInstId DecodeCondBranch(MipsInst inst) {
   uint32_t opcode = inst.GetOpcodeRaw();
   bool is_bgez = opcode & (1 << 16);
-  bool is_linked = ((opcode >> 17) & 0xF) == 0x8;
+  bool is_linked = opcode & (1 << 20);
   bool is_likely = opcode & (1 << 17);
 
   if (is_bgez) {
@@ -285,22 +285,28 @@ MipsInstId Decode(uint32_t opcode) {
     case 0b101110:
       return MipsInstId::kSwr;
     case 0b110000:
+      return kAllowMips3Inst ? MipsInstId::kLl : MipsInstId::kLwc;
     case 0b110001:
     case 0b110010:
-    case 0b110011:
       return MipsInstId::kLwc;
+    case 0b110011:
+      return kAllowMips3Inst ? MipsInstId::kUnknown : MipsInstId::kLwc;
     case 0b110100:
+      return kAllowMips3Inst ? MipsInstId::kLld : MipsInstId::kUnknown;
     case 0b110101:
     case 0b110110:
       return kAllowMips3Inst ? MipsInstId::kLdc : MipsInstId::kUnknown;
     case 0b110111:
       return kAllowMips3Inst ? MipsInstId::kLd : MipsInstId::kUnknown;
     case 0b111000:
+      return kAllowMips3Inst ? MipsInstId::kSc : MipsInstId::kSwc;
     case 0b111001:
     case 0b111010:
-    case 0b111011:
       return MipsInstId::kSwc;
+    case 0b111011:
+      return kAllowMips3Inst ? MipsInstId::kUnknown : MipsInstId::kSwc;
     case 0b111100:
+      return kAllowMips3Inst ? MipsInstId::kScd : MipsInstId::kUnknown;
     case 0b111101:
     case 0b111110:
       return kAllowMips3Inst ? MipsInstId::kSdc : MipsInstId::kUnknown;
@@ -530,6 +536,14 @@ std::string GetInstName(uint32_t opcode) {
       return "sdl";
     case MipsInstId::kSdr:
       return "sdr";
+    case MipsInstId::kLl:
+      return "ll";
+    case MipsInstId::kLld:
+      return "lld";
+    case MipsInstId::kSc:
+      return "sc";
+    case MipsInstId::kScd:
+      return "scd";
     case MipsInstId::kSync:
       return "sync";
     case MipsInstId::kUnknown:
@@ -750,9 +764,13 @@ std::string MipsInst::Disassemble(uint64_t address) {
     case MipsInstId::kLw:
     case MipsInstId::kLwl:
     case MipsInstId::kLwr:
+    case MipsInstId::kLl:
+    case MipsInstId::kLld:
     case MipsInstId::kSb:
     case MipsInstId::kSh:
     case MipsInstId::kSw:
+    case MipsInstId::kSc:
+    case MipsInstId::kScd:
       return DisassembleMemoryAccess(raw_, address);
     case MipsInstId::kLui:
       return DisassembleLui(raw_, address);

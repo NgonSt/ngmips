@@ -109,10 +109,14 @@ enum class MipsInstId {
   kLdl,
   kLdr,
   kLwu,
+  kLl,
+  kLld,
   kSd,
   kSdc,
   kSdl,
   kSdr,
+  kSc,
+  kScd,
   kSync,
 
   kUnknown
