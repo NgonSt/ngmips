@@ -518,35 +518,6 @@ void MipsBase::CheckInterrupt() {
 }
 
 void MipsBase::RunInst() {
-  if (false) {
-    uint32_t pc = pc_;
-
-    if (config_.has_cop0_) {
-      constexpr std::tuple<const char*, uint32_t, int> kFuncMap[] = {
-          {"osCreateThread", 0x80027ED0, 4},
-          {"osStartThread", 0x80032B50, 1},
-          {"osRecvMesg", 0x8002FEA0, 3},
-          {"osSendMesg", 0x80031D50, 3},
-      };
-      for (auto& [name, addr, arg_num] : kFuncMap) {
-        if (pc == addr) {
-          fmt::print("{} (ra = {:08X}) | ", name, ReadGpr32(31));
-          for (int i = 0; i < arg_num; i++) {
-            fmt::print("{:08X} ", ReadGpr32(4 + i));
-          }
-          fmt::print("\n");
-
-          if (name == "osCreateThread" || name == "osStartThread") {
-            uint32_t thread_addr = ReadGpr32(4);
-            uint32_t pc_offset = thread_addr + 0x118 + 4;
-            uint32_t thread_pc = Load32(pc_offset).value;
-            fmt::print("THREAD | pc = {:08X}\n", thread_pc);
-          }
-        }
-      }
-    }
-  }
-
   uint32_t opcode = Fetch(pc_);
   bool is_this_inst_bd = has_branch_delay_;
   if (has_branch_delay_) {
