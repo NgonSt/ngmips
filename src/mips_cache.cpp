@@ -88,7 +88,9 @@ void MipsCache::InsertBlock(const MipsCacheBlock& block) {
   if (!result.found_) {
     return;
   }
+  uint64_t offset = block_copy.end_ - block_copy.start_;
   block_copy.start_ = result.address_;
+  block_copy.end_ = result.address_ + offset;
 
   cache_.insert(std::make_pair(block_copy.start_, block_copy));
 
