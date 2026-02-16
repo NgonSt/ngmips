@@ -319,6 +319,8 @@ int MipsBase::RunCached(int cycle) {
       }
     }
 
+    cache_.ExecuteCacheClear();
+
     const MipsCacheBlock* block = cache_.GetBlock(pc_);
     if (block == nullptr) {
       OnNewBlock(pc_);
@@ -387,7 +389,6 @@ int MipsBase::RunCached(int cycle) {
     if (kEnablePsxSpecific) {
       CheckHook();
     }
-    cache_.ExecuteCacheClear();
 
     cpi_counter_ += executed * config_.cpi_;
     int cpi_integer = cpi_counter_ >> 8;
