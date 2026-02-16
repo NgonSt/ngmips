@@ -1,7 +1,8 @@
 #include "mips_fpu.h"
 
-#include <cmath>
 #include <fmt/format.h>
+
+#include <cmath>
 
 #include "mips_base.h"
 #include "panic.h"
@@ -32,7 +33,8 @@ bool compare(uint32_t opcode, T fs, T ft) {
   bool gt = fs > ft;   // Greater Than
   bool lt = fs < ft;   // Less than
   bool eq = fs == ft;  // Equal
-  bool un = false;     // Unordered
+  bool un = std::isnan(fs) || std::isnan(ft);
+  ;  // Unordered
 
   bool result = false;
   switch (cond) {
@@ -69,32 +71,70 @@ bool compare(uint32_t opcode, T fs, T ft) {
   return result;
 }
 
+int32_t clamp_f32_to_i32(f32_t value) {
+  if (std::isnan(value) || value >= 2147483648.0f) return INT32_MAX;
+  if (value < -2147483648.0f) return INT32_MIN;
+  return static_cast<int32_t>(value);
+}
+
+int32_t clamp_f64_to_i32(f64_t value) {
+  if (std::isnan(value) || value >= 2147483648.0) return INT32_MAX;
+  if (value < -2147483648.0) return INT32_MIN;
+  return static_cast<int32_t>(value);
+}
+
+int64_t clamp_f32_to_i64(f32_t value) {
+  if (std::isnan(value) || value >= 9223372036854775808.0f) return INT64_MAX;
+  if (value < -9223372036854775808.0f) return INT64_MIN;
+  return static_cast<int64_t>(value);
+}
+
+int64_t clamp_f64_to_i64(f64_t value) {
+  if (std::isnan(value) || value >= 9223372036854775808.0) return INT64_MAX;
+  if (value < -9223372036854775808.0) return INT64_MIN;
+  return static_cast<int64_t>(value);
+}
+
 int64_t round_f32(f32_t value, int rm) {
+  f32_t rounded;
   switch (rm) {
     case 0:
-      return nearbyintf(value);
+      rounded = nearbyintf(value);
+      break;
     case 1:
-      return truncf(value);
+      rounded = truncf(value);
+      break;
     case 2:
-      return ceilf(value);
+      rounded = ceilf(value);
+      break;
     case 3:
-      return floorf(value);
+      rounded = floorf(value);
+      break;
+    default:
+      return 0;
   }
-  return 0;
+  return clamp_f32_to_i64(rounded);
 }
 
 int64_t round_f64(f64_t value, int rm) {
+  f64_t rounded;
   switch (rm) {
     case 0:
-      return nearbyint(value);
+      rounded = nearbyint(value);
+      break;
     case 1:
-      return trunc(value);
+      rounded = trunc(value);
+      break;
     case 2:
-      return ceil(value);
+      rounded = ceil(value);
+      break;
     case 3:
-      return floor(value);
+      rounded = floor(value);
+      break;
+    default:
+      return 0;
   }
-  return 0;
+  return clamp_f64_to_i64(rounded);
 }
 
 }  // namespace
@@ -315,9 +355,7 @@ void MipsFpu::WriteI64(int idx, uint64_t value) {
 }
 
 bool MipsFpu::GetFr() {
-  return false;
-  bool fr = cpu_->GetCop(0)->Read32Internal(12) & (1 << 26);
-  return fr;
+  return cpu_->GetCop(0)->Read32Internal(12) & (1 << 26);
 }
 
 void MipsFpu::InstAdd(uint32_t opcode) {
@@ -499,13 +537,13 @@ void MipsFpu::InstRoundL(uint32_t opcode) {
   switch (inst.fmt()) {
     case 16: {
       f32_t fs_value = ReadF32(inst.fs());
-      int64_t fd_value = roundf(fs_value);
+      int64_t fd_value = clamp_f32_to_i64(roundf(fs_value));
       WriteI64(inst.fd(), fd_value);
       break;
     }
     case 17: {
       f64_t fs_value = ReadF64(inst.fs());
-      int64_t fd_value = round(fs_value);
+      int64_t fd_value = clamp_f64_to_i64(round(fs_value));
       WriteI64(inst.fd(), fd_value);
       break;
     }
@@ -520,13 +558,13 @@ void MipsFpu::InstTruncL(uint32_t opcode) {
   switch (inst.fmt()) {
     case 16: {
       f32_t fs_value = ReadF32(inst.fs());
-      int64_t fd_value = truncf(fs_value);
+      int64_t fd_value = clamp_f32_to_i64(truncf(fs_value));
       WriteI64(inst.fd(), fd_value);
       break;
     }
     case 17: {
       f64_t fs_value = ReadF64(inst.fs());
-      int64_t fd_value = trunc(fs_value);
+      int64_t fd_value = clamp_f64_to_i64(trunc(fs_value));
       WriteI64(inst.fd(), fd_value);
       break;
     }
@@ -541,13 +579,13 @@ void MipsFpu::InstCeilL(uint32_t opcode) {
   switch (inst.fmt()) {
     case 16: {
       f32_t fs_value = ReadF32(inst.fs());
-      int64_t fd_value = ceilf(fs_value);
+      int64_t fd_value = clamp_f32_to_i64(ceilf(fs_value));
       WriteI64(inst.fd(), fd_value);
       break;
     }
     case 17: {
       f64_t fs_value = ReadF64(inst.fs());
-      int64_t fd_value = ceil(fs_value);
+      int64_t fd_value = clamp_f64_to_i64(ceil(fs_value));
       WriteI64(inst.fd(), fd_value);
       break;
     }
@@ -562,13 +600,13 @@ void MipsFpu::InstFloorL(uint32_t opcode) {
   switch (inst.fmt()) {
     case 16: {
       f32_t fs_value = ReadF32(inst.fs());
-      int64_t fd_value = floorf(fs_value);
+      int64_t fd_value = clamp_f32_to_i64(floorf(fs_value));
       WriteI64(inst.fd(), fd_value);
       break;
     }
     case 17: {
       f64_t fs_value = ReadF64(inst.fs());
-      int64_t fd_value = floor(fs_value);
+      int64_t fd_value = clamp_f64_to_i64(floor(fs_value));
       WriteI64(inst.fd(), fd_value);
       break;
     }
@@ -583,13 +621,13 @@ void MipsFpu::InstRoundW(uint32_t opcode) {
   switch (inst.fmt()) {
     case 16: {
       f32_t fs_value = ReadF32(inst.fs());
-      int32_t fd_value = roundf(fs_value);
+      int32_t fd_value = clamp_f32_to_i32(roundf(fs_value));
       WriteI32(inst.fd(), fd_value);
       break;
     }
     case 17: {
       f64_t fs_value = ReadF64(inst.fs());
-      int32_t fd_value = round(fs_value);
+      int32_t fd_value = clamp_f64_to_i32(round(fs_value));
       WriteI32(inst.fd(), fd_value);
       break;
     }
@@ -604,13 +642,13 @@ void MipsFpu::InstTruncW(uint32_t opcode) {
   switch (inst.fmt()) {
     case 16: {
       f32_t fs_value = ReadF32(inst.fs());
-      int32_t fd_value = truncf(fs_value);
+      int32_t fd_value = clamp_f32_to_i32(truncf(fs_value));
       WriteI32(inst.fd(), fd_value);
       break;
     }
     case 17: {
       f64_t fs_value = ReadF64(inst.fs());
-      int32_t fd_value = trunc(fs_value);
+      int32_t fd_value = clamp_f64_to_i32(trunc(fs_value));
       WriteI32(inst.fd(), fd_value);
       break;
     }
@@ -625,13 +663,13 @@ void MipsFpu::InstCeilW(uint32_t opcode) {
   switch (inst.fmt()) {
     case 16: {
       f32_t fs_value = ReadF32(inst.fs());
-      int32_t fd_value = ceilf(fs_value);
+      int32_t fd_value = clamp_f32_to_i32(ceilf(fs_value));
       WriteI32(inst.fd(), fd_value);
       break;
     }
     case 17: {
       f64_t fs_value = ReadF64(inst.fs());
-      int32_t fd_value = ceil(fs_value);
+      int32_t fd_value = clamp_f64_to_i32(ceil(fs_value));
       WriteI32(inst.fd(), fd_value);
       break;
     }
@@ -646,13 +684,13 @@ void MipsFpu::InstFloorW(uint32_t opcode) {
   switch (inst.fmt()) {
     case 16: {
       f32_t fs_value = ReadF32(inst.fs());
-      int32_t fd_value = floorf(fs_value);
+      int32_t fd_value = clamp_f32_to_i32(floorf(fs_value));
       WriteI32(inst.fd(), fd_value);
       break;
     }
     case 17: {
       f64_t fs_value = ReadF64(inst.fs());
-      int32_t fd_value = floor(fs_value);
+      int32_t fd_value = clamp_f64_to_i32(floor(fs_value));
       WriteI32(inst.fd(), fd_value);
       break;
     }
@@ -718,16 +756,53 @@ void MipsFpu::InstCvtD(uint32_t opcode) {
 
 void MipsFpu::InstCvtW(uint32_t opcode) {
   FpuRTypeInst inst(opcode);
+  int rm = fcr31_ & 0x3;
   switch (inst.fmt()) {
     case 16: {
       f32_t fs_value = ReadF32(inst.fs());
-      int32_t fd_value = round_f32(fs_value, fcr31_ & 0x3);
+      f32_t rounded;
+      switch (rm) {
+        case 0:
+          rounded = nearbyintf(fs_value);
+          break;
+        case 1:
+          rounded = truncf(fs_value);
+          break;
+        case 2:
+          rounded = ceilf(fs_value);
+          break;
+        case 3:
+          rounded = floorf(fs_value);
+          break;
+        default:
+          rounded = 0;
+          break;
+      }
+      int32_t fd_value = clamp_f32_to_i32(rounded);
       WriteI32(inst.fd(), fd_value);
       break;
     }
     case 17: {
       f64_t fs_value = ReadF64(inst.fs());
-      int32_t fd_value = round_f64(fs_value, fcr31_ & 0x3);
+      f64_t rounded;
+      switch (rm) {
+        case 0:
+          rounded = nearbyint(fs_value);
+          break;
+        case 1:
+          rounded = trunc(fs_value);
+          break;
+        case 2:
+          rounded = ceil(fs_value);
+          break;
+        case 3:
+          rounded = floor(fs_value);
+          break;
+        default:
+          rounded = 0;
+          break;
+      }
+      int32_t fd_value = clamp_f64_to_i32(rounded);
       WriteI32(inst.fd(), fd_value);
       break;
     }
