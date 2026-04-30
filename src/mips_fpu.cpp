@@ -30,11 +30,14 @@ template <class T>
 bool compare(uint32_t opcode, T fs, T ft) {
   uint8_t cond = opcode & 0x7;
   bool allow_unordered = opcode & 0x8;
-  bool gt = fs > ft;   // Greater Than
-  bool lt = fs < ft;   // Less than
-  bool eq = fs == ft;  // Equal
-  bool un = std::isnan(fs) || std::isnan(ft);
-  ;  // Unordered
+  bool gt = fs > ft;                           // Greater Than
+  bool lt = fs < ft;                           // Less than
+  bool eq = fs == ft;                          // Equal
+  bool un = std::isnan(fs) || std::isnan(ft);  // Unordered
+
+  if (un && !allow_unordered) {
+    PANIC("FPU EXCEPTION");
+  }
 
   bool result = false;
   switch (cond) {
@@ -329,7 +332,7 @@ uint32_t MipsFpu::ReadI32(int idx) {
 
 void MipsFpu::WriteI32(int idx, uint32_t value) {
   if (GetFr()) {
-    fpr_[idx] = value;
+    fpr_[idx] = (fpr_[idx] & 0xFFFFFFFF00000000ULL) | static_cast<uint64_t>(value);
   } else {
     int phys = idx & ~1;
     if (idx & 1) {
