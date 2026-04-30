@@ -158,6 +158,9 @@ uint32_t MipsCop0::Read32(int idx) {
       return epc_;
     case 15:
       return 2;
+    case 28:
+      // What's this? Mario tennis reads from this a lot
+      return 0;
     case 30:
       return error_epc_;
     default:
