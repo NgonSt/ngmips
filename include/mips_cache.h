@@ -5,7 +5,7 @@
 #include <set>
 
 const int kCacheBlockMaxLength = 64;
-const int kLookupCacheSize = 4;
+const int kLookupCacheSize = 64;
 
 template<typename MipsT>
 struct MipsCacheEntry {
@@ -45,13 +45,11 @@ class MipsCache {
   bool full_clear_queued_ = false;
   bool has_pending_work_ = false;
 
-  // Multi-entry lookup cache for fast repeat access
   struct LookupCacheEntry {
     uint64_t address_;
     MipsCacheBlock<MipsT>* block_;
   };
   LookupCacheEntry lookup_cache_[kLookupCacheSize];
-  int lookup_cache_index_;  // Round-robin insertion pointer
 
   TlbType* tlb_;
 };

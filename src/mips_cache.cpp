@@ -18,7 +18,6 @@ constexpr uint64_t kPhysicalUnmappedAddress = 0xFFFFFFFFFFFFFFFFUL;
 
 CACHE_TEMPLATE
 CACHE_CLASS::MipsCache() {
-  lookup_cache_index_ = 0;
   for (int i = 0; i < kLookupCacheSize; i++) {
     lookup_cache_[i].address_ = 0;
     lookup_cache_[i].block_ = nullptr;
@@ -31,7 +30,6 @@ void CACHE_CLASS::Reset() {
   has_pending_work_ = false;
   pending_invalidations_.clear();
   cache_.clear();
-  lookup_cache_index_ = 0;
   for (int i = 0; i < kLookupCacheSize; i++) {
     lookup_cache_[i].address_ = 0;
     lookup_cache_[i].block_ = nullptr;
@@ -59,22 +57,16 @@ MipsCacheBlock<MipsT>* CACHE_CLASS::GetBlock(uint64_t address) {
     address = result.address_;
   }
 
-  // Check multi-entry lookup cache (linear search is fast for small sizes)
-  for (int i = 0; i < kLookupCacheSize; i++) {
-    if (lookup_cache_[i].address_ == address && lookup_cache_[i].block_ != nullptr) [[likely]] {
-      return lookup_cache_[i].block_;  // Cache hit
-    }
+  int idx = static_cast<int>((address >> 2) & (kLookupCacheSize - 1));
+  if (lookup_cache_[idx].address_ == address && lookup_cache_[idx].block_ != nullptr) {
+    return lookup_cache_[idx].block_;
   }
 
-  // Cache miss: look up in hash map
   auto found = cache_.find(address);
   if (found != cache_.end()) {
-    // Insert into lookup cache using round-robin
-    int insert_index = lookup_cache_index_;
-    lookup_cache_[insert_index].address_ = address;
-    lookup_cache_[insert_index].block_ = &found->second;
-    lookup_cache_index_ = (lookup_cache_index_ + 1) & (kLookupCacheSize - 1);
-    return lookup_cache_[insert_index].block_;
+    lookup_cache_[idx].address_ = address;
+    lookup_cache_[idx].block_ = &found->second;
+    return lookup_cache_[idx].block_;
   }
   return nullptr;
 }
@@ -188,11 +180,10 @@ void CACHE_CLASS::ExecuteCacheClear() {
       auto it = cache_.begin();
       while (it != cache_.end()) {
         if (address >= it->second.start_ && address < it->second.end_) {
-          // Invalidate lookup cache entries pointing to this block
-          for (int i = 0; i < kLookupCacheSize; i++) {
-            if (lookup_cache_[i].block_ == &it->second) {
-              lookup_cache_[i].block_ = nullptr;
-            }
+          // Invalidate direct-mapped lookup cache slot for this block's start address
+          int inv_idx = static_cast<int>((it->second.start_ >> 2) & (kLookupCacheSize - 1));
+          if (lookup_cache_[inv_idx].address_ == it->second.start_) {
+            lookup_cache_[inv_idx].block_ = nullptr;
           }
           it = cache_.erase(it);
           break;
