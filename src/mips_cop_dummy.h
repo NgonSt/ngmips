@@ -5,7 +5,7 @@ class MipsCopDummy : public MipsCopBase {
  public:
   MipsCopDummy() {};
 
-  void ConnectCpu(MipsBase* cpu) override {};
+  void ConnectCpu(MipsInterface* cpu) override {};
   void Reset() override {};
   void Command(uint32_t command) override {};
   uint32_t Read32(int idx) override { return 0; };

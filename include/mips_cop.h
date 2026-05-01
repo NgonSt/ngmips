@@ -1,11 +1,11 @@
 #pragma once
 #include <cstdint>
 
-class MipsBase; // Cross reference
+class MipsInterface;  // forward declaration
 
 class MipsCopBase {
 public:
-    virtual void ConnectCpu(MipsBase* cpu) = 0;
+    virtual void ConnectCpu(MipsInterface* cpu) = 0;
     virtual void Reset() = 0;
     virtual void Command(uint32_t command) = 0;
     virtual uint32_t Read32(int idx) = 0;

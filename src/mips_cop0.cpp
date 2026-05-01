@@ -38,7 +38,7 @@ MipsCop0::MipsCop0() {
   surpress_compare_interrupt_ = false;
 }
 
-void MipsCop0::ConnectCpu(MipsBase* cpu) {
+void MipsCop0::ConnectCpu(MipsInterface* cpu) {
   cpu_ = cpu;
 }
 

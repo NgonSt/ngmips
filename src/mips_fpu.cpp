@@ -145,7 +145,7 @@ int64_t round_f64(f64_t value, int rm) {
 MipsFpu::MipsFpu() {
 }
 
-void MipsFpu::ConnectCpu(MipsBase* cpu) {
+void MipsFpu::ConnectCpu(MipsInterface* cpu) {
   cpu_ = cpu;
 }
 

@@ -7,6 +7,8 @@
 #include "mips_cache.h"
 #include "mips_cop.h"
 #include "mips_tlb.h"
+#include "mips_tlb_normal.h"
+#include "mips_tlb_dummy.h"
 #include "mips_hook.h"
 
 typedef __int128_t int128_t;
@@ -31,6 +33,21 @@ enum class ExceptionCause {
   kOvf = 12
 };
 
+struct MipsConfig {
+  bool is_64bit_ = false;
+  bool use_big_endian_ = false;
+  bool has_load_delay_ = false;
+  bool has_exception_ = false;
+  bool allow_misaligned_access_ = false;
+  bool has_cop0_ = false;
+  bool has_fpu_ = false;
+  bool use_cached_interpreter_ = false;
+  bool has_isolate_cache_bit_ = false;
+  bool use_hook_ = false;
+  uint8_t cop_decoding_override_ = 0;
+  uint16_t cpi_ = 0x180;
+};
+
 class MipsLog {
  public:
   uint64_t pc_;
@@ -47,53 +64,73 @@ struct DelayedLoadOp {
   uint32_t value_;
 };
 
-struct MipsConfig {
-  bool is_64bit_;
-  bool use_big_endian_;
-  bool has_load_delay_;
-  bool has_exception_;            // RSP doesn't have exception
-  bool allow_misaligned_access_;  // RSP allows misaligned memory access
-  bool has_cop0_;                 // RSP doesn't have conventional cop0
-  bool has_tlb_; 
-  bool has_fpu_;
-  bool has_isolate_cache_bit_;     // for PSX
-  uint8_t cop_decoding_override_;  // if (x & cop_id), redirect lwc/swc/mfc/mtc/cfc/ctc -> cop
-  bool use_hook_;
-  uint16_t cpi_;  // u8.8 fixed point
-  bool use_cached_interpreter_;
+// Non-templated abstract base — stable API for external code (buses, COPs, etc.)
+class MipsInterface {
+ public:
+  virtual ~MipsInterface() = default;
+  virtual void Reset() = 0;
+  virtual int Run(int cycle) = 0;
+  virtual void ConnectCop(std::shared_ptr<MipsCopBase> cop, int idx) = 0;
+  virtual void ConnectBus(std::shared_ptr<BusBase> bus) = 0;
+  virtual void ConnectHook(std::shared_ptr<MipsHookBase> hook, int idx) = 0;
+  virtual void SetPc(uint64_t pc) = 0;
+  virtual void SetPcDuringInst(uint64_t pc) = 0;
+  virtual uint64_t GetPc() = 0;
+  virtual uint64_t GetGpr(int idx) = 0;
+  virtual void SetGpr(int idx, uint64_t value) = 0;
+  virtual void SetLlbit(bool llbit) = 0;
+  virtual bool GetHalt() = 0;
+  virtual void SetHalt(bool halt) = 0;
+  virtual uint64_t GetTimestamp() = 0;
+  virtual void CheckCompare() = 0;
+  virtual void ClearCompareInterrupt() = 0;
+  virtual void CheckInterrupt() = 0;
+  virtual MipsCopBase* GetCop(int idx) = 0;
+  virtual MipsTlbBase* GetTlb() = 0;
+  virtual void DumpProcessorLog() = 0;
+  virtual void QueueCacheClear() = 0;
 };
 
-class MipsBase {
+template<
+  typename TlbType,
+  bool kIs64Bit,
+  bool kHasLoadDelay,
+  bool kHasCop0
+>
+class MipsBase : public MipsInterface {
  public:
   MipsBase();
   MipsBase(MipsConfig config);
   ~MipsBase();
-  void Reset();
-  int Run(int cycle);
+  void Reset() override;
+  int Run(int cycle) override;
   int RunCached(int cycle);
   void RunInst();
-  void ConnectCop(std::shared_ptr<MipsCopBase> cop, int idx);
-  void ConnectBus(std::shared_ptr<BusBase> bus);
-  void ConnectHook(std::shared_ptr<MipsHookBase> hook, int idx);
-  void SetPc(uint64_t pc);
-  void SetPcDuringInst(uint64_t pc);
-  uint64_t GetPc();
-  uint64_t GetGpr(int idx);
-  void SetGpr(int idx, uint64_t value);
-  void SetLlbit(bool llbit);
-  bool GetHalt();
-  void SetHalt(bool halt);
-  uint64_t GetTimestamp();
-  void CheckCompare();
-  void ClearCompareInterrupt();
-  void CheckInterrupt();
-  MipsCopBase* GetCop(int idx) { return cop_[idx].get(); };
-  MipsTlbBase* GetTlb() { return tlb_.get(); };
-  MipsCache& GetMipsCache() { return cache_; };
-  void DumpProcessorLog();
+  void ConnectCop(std::shared_ptr<MipsCopBase> cop, int idx) override;
+  void ConnectBus(std::shared_ptr<BusBase> bus) override;
+  void ConnectHook(std::shared_ptr<MipsHookBase> hook, int idx) override;
+  void SetPc(uint64_t pc) override;
+  void SetPcDuringInst(uint64_t pc) override;
+  uint64_t GetPc() override;
+  uint64_t GetGpr(int idx) override;
+  void SetGpr(int idx, uint64_t value) override;
+  void SetLlbit(bool llbit) override;
+  bool GetHalt() override;
+  void SetHalt(bool halt) override;
+  uint64_t GetTimestamp() override;
+  void CheckCompare() override;
+  void ClearCompareInterrupt() override;
+  void CheckInterrupt() override;
+  MipsCopBase* GetCop(int idx) override { return cop_[idx].get(); }
+  MipsTlbBase* GetTlb() override { return &tlb_; }
+  void DumpProcessorLog() override;
+  void QueueCacheClear() override { cache_.QueueCacheClear(); }
 
  private:
-  inst_ptr_t GetInstFuncPtr(uint32_t opcode);
+  using inst_ptr_t = void (MipsBase::*)(uint32_t);
+  using Cache = MipsCache<MipsBase, TlbType>;
+
+  auto GetInstFuncPtr(uint32_t opcode) -> inst_ptr_t;
   uint32_t ReadGpr32(int idx);
   void WriteGpr32(int idx, uint32_t value);
   void WriteGpr32Sext(int idx, int32_t value);
@@ -258,12 +295,19 @@ class MipsBase {
   int mips_log_index_;
   MipsLog mips_log_[kMipsInstLogCount];
 
-  MipsCache cache_;
+  Cache cache_;
   bool halt_;
+
+  MipsConfig config_;
 
  protected:
   std::shared_ptr<BusBase> bus_;
   std::shared_ptr<MipsCopBase> cop_[4];
-  std::shared_ptr<MipsTlbBase> tlb_;
-  MipsConfig config_;
+  TlbType tlb_;
 };
+
+using N64Mips = MipsBase<MipsTlbNormal, true,  false, true>;
+using RspMips = MipsBase<MipsTlbDummy,  false, false, false>;
+
+extern template class MipsBase<MipsTlbNormal, true,  false, true>;
+extern template class MipsBase<MipsTlbDummy,  false, false, false>;

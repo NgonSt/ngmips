@@ -9,7 +9,7 @@ class MipsFpu : public MipsCopBase {
  public:
   MipsFpu();
 
-  void ConnectCpu(MipsBase* cpu) override;
+  void ConnectCpu(MipsInterface* cpu) override;
   void Reset() override;
   void Command(uint32_t command) override;
   uint32_t Read32(int idx) override;
@@ -55,7 +55,7 @@ class MipsFpu : public MipsCopBase {
   void InstCvtL(uint32_t opcode);
   void InstC(uint32_t opcode);
 
-  MipsBase* cpu_;
+  MipsInterface* cpu_;
 
   uint64_t fpr_[32];
   uint32_t fcr31_;

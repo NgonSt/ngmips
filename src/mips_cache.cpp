@@ -1,20 +1,23 @@
 #include "mips_cache.h"
 
+#include "mips_base.h"
 #include "panic.h"
+
+// Bring in TLB types so they're complete for explicit instantiation
+#include "mips_tlb_normal.h"
+#include "mips_tlb_dummy.h"
 
 namespace {
 
 constexpr uint64_t kPhysicalUnmappedAddress = 0xFFFFFFFFFFFFFFFFUL;
 
-uint64_t calculate_physical_address_psx(uint64_t address) {
-  address &= 0xFFFFFFFF;
-
-  return kPhysicalUnmappedAddress;
-}
-
 }  // namespace
 
-MipsCache::MipsCache() {
+#define CACHE_TEMPLATE template<typename MipsT, typename TlbType>
+#define CACHE_CLASS MipsCache<MipsT, TlbType>
+
+CACHE_TEMPLATE
+CACHE_CLASS::MipsCache() {
   lookup_cache_index_ = 0;
   for (int i = 0; i < kLookupCacheSize; i++) {
     lookup_cache_[i].address_ = 0;
@@ -22,8 +25,10 @@ MipsCache::MipsCache() {
   }
 }
 
-void MipsCache::Reset() {
+CACHE_TEMPLATE
+void CACHE_CLASS::Reset() {
   full_clear_queued_ = false;
+  has_pending_work_ = false;
   pending_invalidations_.clear();
   cache_.clear();
   lookup_cache_index_ = 0;
@@ -33,11 +38,13 @@ void MipsCache::Reset() {
   }
 }
 
-void MipsCache::ConnectTlb(std::shared_ptr<MipsTlbBase> tlb) {
+CACHE_TEMPLATE
+void CACHE_CLASS::ConnectTlb(TlbType* tlb) {
   tlb_ = tlb;
 }
 
-MipsCacheBlock* MipsCache::GetBlock(uint64_t address) {
+CACHE_TEMPLATE
+MipsCacheBlock<MipsT>* CACHE_CLASS::GetBlock(uint64_t address) {
   // Fast path for kseg0/kseg1: avoid virtual TLB call
   address &= 0xFFFFFFFF;
   bool is_kseg0 = address >= 0x80000000 && address < 0xA0000000;
@@ -45,7 +52,7 @@ MipsCacheBlock* MipsCache::GetBlock(uint64_t address) {
   if (is_kseg0 || is_kseg1) {
     address = address & 0x1FFFFFFF;
   } else {
-    MipsTlbTranslationResult result = tlb_->TranslateAddress(address);
+    auto result = tlb_->TranslateAddress(address);
     if (!result.found_) {
       return nullptr;
     }
@@ -72,8 +79,9 @@ MipsCacheBlock* MipsCache::GetBlock(uint64_t address) {
   return nullptr;
 }
 
-MipsCacheBlock* MipsCache::GetOverlappingEntry(uint64_t address) {
-  MipsTlbTranslationResult result = tlb_->TranslateAddress(address);
+CACHE_TEMPLATE
+MipsCacheBlock<MipsT>* CACHE_CLASS::GetOverlappingEntry(uint64_t address) {
+  auto result = tlb_->TranslateAddress(address);
   if (!result.found_) {
     return nullptr;
   }
@@ -82,9 +90,10 @@ MipsCacheBlock* MipsCache::GetOverlappingEntry(uint64_t address) {
   return nullptr;
 }
 
-void MipsCache::InsertBlock(const MipsCacheBlock& block) {
-  MipsCacheBlock block_copy = block;
-  MipsTlbTranslationResult result = tlb_->TranslateAddress(block_copy.start_);
+CACHE_TEMPLATE
+void CACHE_CLASS::InsertBlock(const MipsCacheBlock<MipsT>& block) {
+  MipsCacheBlock<MipsT> block_copy = block;
+  auto result = tlb_->TranslateAddress(block_copy.start_);
   if (!result.found_) {
     return;
   }
@@ -101,8 +110,9 @@ void MipsCache::InsertBlock(const MipsCacheBlock& block) {
   }
 }
 
-void MipsCache::InvalidateBlock(uint64_t address) {
-  MipsTlbTranslationResult result = tlb_->TranslateAddress(address);
+CACHE_TEMPLATE
+void CACHE_CLASS::InvalidateBlock(uint64_t address) {
+  auto result = tlb_->TranslateAddress(address);
   if (!result.found_) {
     return;
   }
@@ -111,6 +121,7 @@ void MipsCache::InvalidateBlock(uint64_t address) {
   bool is_in_cache = cache_.find(address) != cache_.end();
   if (is_in_cache) {
     pending_invalidations_.insert(address);
+    has_pending_work_ = true;
     return;
   }
 
@@ -122,6 +133,7 @@ void MipsCache::InvalidateBlock(uint64_t address) {
   while (it != cache_.end()) {
     if (address >= it->second.start_ && address < it->second.end_) {
       pending_invalidations_.insert(it->second.start_);
+      has_pending_work_ = true;
       break;
     } else {
       ++it;
@@ -129,8 +141,9 @@ void MipsCache::InvalidateBlock(uint64_t address) {
   }
 }
 
-void MipsCache::InvalidateBlockRange(uint64_t start, uint64_t end) {
-  MipsTlbTranslationResult result = tlb_->TranslateAddress(start);
+CACHE_TEMPLATE
+void CACHE_CLASS::InvalidateBlockRange(uint64_t start, uint64_t end) {
+  auto result = tlb_->TranslateAddress(start);
   if (!result.found_) {
     return;
   }
@@ -141,20 +154,25 @@ void MipsCache::InvalidateBlockRange(uint64_t start, uint64_t end) {
   while (it != cache_.end()) {
     if (it->second.start_ < phys_end && it->second.end_ > phys_start) {
       pending_invalidations_.insert(it->second.start_);
+      has_pending_work_ = true;
     }
     ++it;
   }
 }
 
-void MipsCache::QueueCacheClear() {
+CACHE_TEMPLATE
+void CACHE_CLASS::QueueCacheClear() {
   full_clear_queued_ = true;
+  has_pending_work_ = true;
 }
 
-void MipsCache::ExecuteCacheClear() {
+CACHE_TEMPLATE
+void CACHE_CLASS::ExecuteCacheClear() {
   if (full_clear_queued_) {
     cache_.clear();
     pending_invalidations_.clear();
     full_clear_queued_ = false;
+    has_pending_work_ = false;
     // Clear lookup cache
     for (int i = 0; i < kLookupCacheSize; i++) {
       lookup_cache_[i].address_ = 0;
@@ -184,5 +202,10 @@ void MipsCache::ExecuteCacheClear() {
       }
     }
     pending_invalidations_.clear();
+    has_pending_work_ = false;
   }
 }
+
+// Explicit instantiations — keep definitions out of other TUs
+template class MipsCache<N64Mips, MipsTlbNormal>;
+template class MipsCache<RspMips, MipsTlbDummy>;

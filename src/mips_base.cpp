@@ -8,10 +8,16 @@
 #include "mips_decode.h"
 #include "mips_fpu.h"
 #include "mips_hook_dummy.h"
-#include "mips_tlb.h"
 #include "mips_tlb_dummy.h"
 #include "mips_tlb_normal.h"
 #include "panic.h"
+
+#define MIPS_TEMPLATE \
+  template<typename TlbType, bool kIs64Bit, bool kHasLoadDelay, bool kHasCop0>
+
+#define MIPS_BASE \
+  MipsBase<TlbType, kIs64Bit, kHasLoadDelay, kHasCop0>
+
 
 namespace {
 
@@ -102,55 +108,11 @@ int32_t sext_itype_imm_branch(ITypeInst inst) {
 
 }  // namespace
 
-MipsBase::MipsBase() {
-  config_ = MipsConfig();
+MIPS_TEMPLATE
+MIPS_BASE::MipsBase() : MipsBase(MipsConfig{}) {}
 
-  for (int i = 0; i < 32; i++) {
-    gpr_[i] = 0;
-  }
-  hi_ = 0;
-  lo_ = 0;
-  pc_ = 0;
-  next_pc_ = 0;
-  llbit_ = false;
-
-  cycle_spent_ = 0;
-  cycle_spent_total_ = 0;
-  has_branch_delay_ = false;
-  branch_delay_dst_ = 0;
-
-  compare_interrupt_ = false;
-  cop_cause_ = 0;
-
-  mips_log_index_ = 0;
-
-  if (config_.has_cop0_) {
-    cop_[0] = std::make_shared<MipsCop0>();
-  } else {
-    cop_[0] = std::make_shared<MipsCopDummy>();
-  }
-  if (config_.has_fpu_) {
-    cop_[1] = std::make_shared<MipsFpu>();
-  } else {
-    cop_[1] = std::make_shared<MipsCopDummy>();
-  }
-  cop_[2] = std::make_shared<MipsCopDummy>();
-  cop_[3] = std::make_shared<MipsCopDummy>();
-  for (int i = 0; i < 4; i++) {
-    cop_[i]->ConnectCpu(this);
-  }
-  if (config_.has_tlb_) {
-    tlb_ = std::make_shared<MipsTlbNormal>();
-  } else {
-    tlb_ = std::make_shared<MipsTlbDummy>();
-  }
-  hook_[0] = std::make_shared<MipsHookDummy>();
-  hook_[1] = std::make_shared<MipsHookDummy>();
-
-  cache_.ConnectTlb(tlb_);
-}
-
-MipsBase::MipsBase(MipsConfig config) {
+MIPS_TEMPLATE
+MIPS_BASE::MipsBase(MipsConfig config) {
   config_ = config;
 
   for (int i = 0; i < 32; i++) {
@@ -163,6 +125,7 @@ MipsBase::MipsBase(MipsConfig config) {
   llbit_ = false;
 
   cycle_spent_ = 0;
+  cpi_counter_ = 0;
   cycle_spent_total_ = 0;
   has_branch_delay_ = false;
   branch_delay_dst_ = 0;
@@ -173,7 +136,7 @@ MipsBase::MipsBase(MipsConfig config) {
   halt_ = false;
   mips_log_index_ = 0;
 
-  if (config_.has_cop0_) {
+  if constexpr (kHasCop0) {
     cop_[0] = std::make_shared<MipsCop0>();
   } else {
     cop_[0] = std::make_shared<MipsCopDummy>();
@@ -188,24 +151,21 @@ MipsBase::MipsBase(MipsConfig config) {
   for (int i = 0; i < 4; i++) {
     cop_[i]->ConnectCpu(this);
   }
-  if (config_.has_tlb_) {
-    tlb_ = std::make_shared<MipsTlbNormal>();
-  } else {
-    tlb_ = std::make_shared<MipsTlbDummy>();
-  }
   hook_[0] = std::make_shared<MipsHookDummy>();
   hook_[1] = std::make_shared<MipsHookDummy>();
 
-  cache_.ConnectTlb(tlb_);
+  cache_.ConnectTlb(&tlb_);
 }
 
-MipsBase::~MipsBase() {
+MIPS_TEMPLATE
+MIPS_BASE::~MipsBase() {
   if (cycle_spent_total_ != 0) {
     DumpProcessorLog();
   }
 }
 
-void MipsBase::Reset() {
+MIPS_TEMPLATE
+void MIPS_BASE::Reset() {
   for (int i = 0; i < 32; i++) {
     gpr_[i] = 0;
   }
@@ -235,7 +195,7 @@ void MipsBase::Reset() {
     cop_[i]->Reset();
   }
 
-  tlb_->Reset();
+  tlb_.Reset();
 
   if (config_.use_hook_) {
     for (auto& hook : hook_) {
@@ -280,7 +240,9 @@ void MipsBase::Reset() {
   }
 }
 
-int MipsBase::Run(int cycle) {
+
+MIPS_TEMPLATE
+int MIPS_BASE::Run(int cycle) {
   if (config_.use_cached_interpreter_) {
     return RunCached(cycle);
   }
@@ -304,7 +266,9 @@ int MipsBase::Run(int cycle) {
   return cycle_spent_;
 }
 
-int MipsBase::RunCached(int cycle) {
+
+MIPS_TEMPLATE
+int MIPS_BASE::RunCached(int cycle) {
   cycle_spent_ = 0;
   while (cycle_spent_ < cycle) {
     CheckInterrupt();
@@ -319,9 +283,9 @@ int MipsBase::RunCached(int cycle) {
       }
     }
 
-    cache_.ExecuteCacheClear();
+    if (cache_.HasPendingWork()) { cache_.ExecuteCacheClear(); }
 
-    const MipsCacheBlock* block = cache_.GetBlock(pc_);
+    const MipsCacheBlock<MipsBase>* block = cache_.GetBlock(pc_);
     if (block == nullptr) {
       OnNewBlock(pc_);
       block = cache_.GetBlock(pc_);
@@ -331,7 +295,7 @@ int MipsBase::RunCached(int cycle) {
     }
 
     const int length = block->length_;
-    const MipsCacheEntry* entries = block->entries_;
+    const MipsCacheEntry<MipsBase>* entries = block->entries_;
 
     int executed = 0;
     for (int i = 0; i < length; i++) {
@@ -363,7 +327,7 @@ int MipsBase::RunCached(int cycle) {
       }
 
       if (kLogCpu) {
-        fmt::print("{}\n", log.ToString(config_.is_64bit_));
+        fmt::print("{}\n", log.ToString(kIs64Bit));
       }
 
       if (config_.use_hook_) {
@@ -380,7 +344,7 @@ int MipsBase::RunCached(int cycle) {
       }
 
       (this->*fp)(opcode);
-      ExecuteDelayedLoad();
+      if constexpr (kHasLoadDelay) { ExecuteDelayedLoad(); }
 
       pc_ = next_pc_ & 0xFFFFFFFF;
       executed++;
@@ -400,64 +364,90 @@ int MipsBase::RunCached(int cycle) {
   return cycle_spent_;
 }
 
-void MipsBase::ConnectCop(std::shared_ptr<MipsCopBase> cop, int idx) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::ConnectCop(std::shared_ptr<MipsCopBase> cop, int idx) {
   cop_[idx] = cop;
 }
 
-void MipsBase::ConnectBus(std::shared_ptr<BusBase> bus) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::ConnectBus(std::shared_ptr<BusBase> bus) {
   bus_ = bus;
 }
 
-void MipsBase::ConnectHook(std::shared_ptr<MipsHookBase> hook, int idx) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::ConnectHook(std::shared_ptr<MipsHookBase> hook, int idx) {
   hook_[idx] = hook;
 }
 
-void MipsBase::SetPc(uint64_t pc) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::SetPc(uint64_t pc) {
   pc_ = pc;
   next_pc_ = pc + 4;
 }
 
-void MipsBase::SetPcDuringInst(uint64_t pc) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::SetPcDuringInst(uint64_t pc) {
   pc_ = pc;
   next_pc_ = pc;
 }
 
-uint64_t MipsBase::GetPc() {
+
+MIPS_TEMPLATE
+uint64_t MIPS_BASE::GetPc() {
   return pc_;
 }
 
-uint64_t MipsBase::GetGpr(int idx) {
+
+MIPS_TEMPLATE
+uint64_t MIPS_BASE::GetGpr(int idx) {
   if (idx == 0) {
     return 0;
   }
   return gpr_[idx];
 }
 
-void MipsBase::SetGpr(int idx, uint64_t value) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::SetGpr(int idx, uint64_t value) {
   if (idx == 0) {
     return;
   }
   gpr_[idx] = value;
 }
 
-void MipsBase::SetLlbit(bool llbit) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::SetLlbit(bool llbit) {
   llbit_ = llbit;
 }
 
-bool MipsBase::GetHalt() {
+
+MIPS_TEMPLATE
+bool MIPS_BASE::GetHalt() {
   return halt_;
 }
 
-void MipsBase::SetHalt(bool halt) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::SetHalt(bool halt) {
   halt_ = halt;
 }
 
-uint64_t MipsBase::GetTimestamp() {
+
+MIPS_TEMPLATE
+uint64_t MIPS_BASE::GetTimestamp() {
   return cycle_spent_total_;
 }
 
-void MipsBase::CheckCompare() {
-  if (!config_.has_cop0_ || config_.has_isolate_cache_bit_) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::CheckCompare() {
+  if (!kHasCop0 || config_.has_isolate_cache_bit_) {
     return;
   }
 
@@ -475,12 +465,16 @@ void MipsBase::CheckCompare() {
   }
 }
 
-void MipsBase::ClearCompareInterrupt() {
+
+MIPS_TEMPLATE
+void MIPS_BASE::ClearCompareInterrupt() {
   compare_interrupt_ = false;
 }
 
-void MipsBase::CheckInterrupt() {
-  if (!config_.has_exception_ || !config_.has_cop0_) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::CheckInterrupt() {
+  if (!config_.has_exception_ || !kHasCop0) {
     return;
   }
 
@@ -518,7 +512,9 @@ void MipsBase::CheckInterrupt() {
   }
 }
 
-void MipsBase::RunInst() {
+
+MIPS_TEMPLATE
+void MIPS_BASE::RunInst() {
   uint32_t opcode = Fetch(pc_);
   bool is_this_inst_bd = has_branch_delay_;
   if (has_branch_delay_) {
@@ -546,7 +542,7 @@ void MipsBase::RunInst() {
   }
 
   if (kLogCpu) {
-    fmt::print("{}\n", log.ToString(config_.is_64bit_));
+    fmt::print("{}\n", log.ToString(kIs64Bit));
   }
 
   if (config_.use_hook_) {
@@ -558,7 +554,7 @@ void MipsBase::RunInst() {
   inst_ptr_t fp = GetInstFuncPtr(opcode);
   (this->*fp)(opcode);
 
-  ExecuteDelayedLoad();
+  if constexpr (kHasLoadDelay) { ExecuteDelayedLoad(); }
 
   pc_ = next_pc_;
   cpi_counter_ += config_.cpi_;
@@ -572,7 +568,9 @@ void MipsBase::RunInst() {
   }
 }
 
-inst_ptr_t MipsBase::GetInstFuncPtr(uint32_t opcode) {
+
+MIPS_TEMPLATE
+auto MIPS_BASE::GetInstFuncPtr(uint32_t opcode) -> inst_ptr_t {
   switch (Decode(opcode)) {
     case MipsInstId::kAdd:
       return &MipsBase::InstAdd;
@@ -707,138 +705,150 @@ inst_ptr_t MipsBase::GetInstFuncPtr(uint32_t opcode) {
     case MipsInstId::kNop:
       return &MipsBase::InstNop;
     case MipsInstId::kBcf:
-      return config_.is_64bit_ ? &MipsBase::InstBcf : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstBcf : &MipsBase::InstUnknown;
     case MipsInstId::kBcfl:
-      return config_.is_64bit_ ? &MipsBase::InstBcfl : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstBcfl : &MipsBase::InstUnknown;
     case MipsInstId::kBct:
-      return config_.is_64bit_ ? &MipsBase::InstBct : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstBct : &MipsBase::InstUnknown;
     case MipsInstId::kBctl:
-      return config_.is_64bit_ ? &MipsBase::InstBctl : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstBctl : &MipsBase::InstUnknown;
     case MipsInstId::kBeql:
-      return config_.is_64bit_ ? &MipsBase::InstBeql : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstBeql : &MipsBase::InstUnknown;
     case MipsInstId::kBnel:
-      return config_.is_64bit_ ? &MipsBase::InstBnel : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstBnel : &MipsBase::InstUnknown;
     case MipsInstId::kBgezl:
-      return config_.is_64bit_ ? &MipsBase::InstBgezl : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstBgezl : &MipsBase::InstUnknown;
     case MipsInstId::kBgezall:
-      return config_.is_64bit_ ? &MipsBase::InstBgezall : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstBgezall : &MipsBase::InstUnknown;
     case MipsInstId::kBgtzl:
-      return config_.is_64bit_ ? &MipsBase::InstBgtzl : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstBgtzl : &MipsBase::InstUnknown;
     case MipsInstId::kBlezl:
-      return config_.is_64bit_ ? &MipsBase::InstBlezl : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstBlezl : &MipsBase::InstUnknown;
     case MipsInstId::kBltzl:
-      return config_.is_64bit_ ? &MipsBase::InstBltzl : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstBltzl : &MipsBase::InstUnknown;
     case MipsInstId::kBltzall:
-      return config_.is_64bit_ ? &MipsBase::InstBltzall : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstBltzall : &MipsBase::InstUnknown;
     case MipsInstId::kCache:
-      return config_.is_64bit_ ? &MipsBase::InstCache : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstCache : &MipsBase::InstUnknown;
     case MipsInstId::kDadd:
-      return config_.is_64bit_ ? &MipsBase::InstDadd : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstDadd : &MipsBase::InstUnknown;
     case MipsInstId::kDaddu:
-      return config_.is_64bit_ ? &MipsBase::InstDaddu : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstDaddu : &MipsBase::InstUnknown;
     case MipsInstId::kDaddi:
-      return config_.is_64bit_ ? &MipsBase::InstDaddi : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstDaddi : &MipsBase::InstUnknown;
     case MipsInstId::kDaddiu:
-      return config_.is_64bit_ ? &MipsBase::InstDaddiu : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstDaddiu : &MipsBase::InstUnknown;
     case MipsInstId::kDsub:
-      return config_.is_64bit_ ? &MipsBase::InstDsub : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstDsub : &MipsBase::InstUnknown;
     case MipsInstId::kDsubu:
-      return config_.is_64bit_ ? &MipsBase::InstDsubu : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstDsubu : &MipsBase::InstUnknown;
     case MipsInstId::kDmult:
-      return config_.is_64bit_ ? &MipsBase::InstDmult : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstDmult : &MipsBase::InstUnknown;
     case MipsInstId::kDmultu:
-      return config_.is_64bit_ ? &MipsBase::InstDmultu : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstDmultu : &MipsBase::InstUnknown;
     case MipsInstId::kDdiv:
-      return config_.is_64bit_ ? &MipsBase::InstDdiv : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstDdiv : &MipsBase::InstUnknown;
     case MipsInstId::kDdivu:
-      return config_.is_64bit_ ? &MipsBase::InstDdivu : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstDdivu : &MipsBase::InstUnknown;
     case MipsInstId::kDsll:
-      return config_.is_64bit_ ? &MipsBase::InstDsll : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstDsll : &MipsBase::InstUnknown;
     case MipsInstId::kDsll32:
-      return config_.is_64bit_ ? &MipsBase::InstDsll32 : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstDsll32 : &MipsBase::InstUnknown;
     case MipsInstId::kDsllv:
-      return config_.is_64bit_ ? &MipsBase::InstDsllv : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstDsllv : &MipsBase::InstUnknown;
     case MipsInstId::kDsra:
-      return config_.is_64bit_ ? &MipsBase::InstDsra : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstDsra : &MipsBase::InstUnknown;
     case MipsInstId::kDsra32:
-      return config_.is_64bit_ ? &MipsBase::InstDsra32 : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstDsra32 : &MipsBase::InstUnknown;
     case MipsInstId::kDsrav:
-      return config_.is_64bit_ ? &MipsBase::InstDsrav : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstDsrav : &MipsBase::InstUnknown;
     case MipsInstId::kDsrl:
-      return config_.is_64bit_ ? &MipsBase::InstDsrl : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstDsrl : &MipsBase::InstUnknown;
     case MipsInstId::kDsrl32:
-      return config_.is_64bit_ ? &MipsBase::InstDsrl32 : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstDsrl32 : &MipsBase::InstUnknown;
     case MipsInstId::kDsrlv:
-      return config_.is_64bit_ ? &MipsBase::InstDsrlv : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstDsrlv : &MipsBase::InstUnknown;
     case MipsInstId::kDmfc:
-      return config_.is_64bit_ ? &MipsBase::InstDmfc : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstDmfc : &MipsBase::InstUnknown;
     case MipsInstId::kDmtc:
-      return config_.is_64bit_ ? &MipsBase::InstDmtc : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstDmtc : &MipsBase::InstUnknown;
     case MipsInstId::kLd:
-      return config_.is_64bit_ ? &MipsBase::InstLd : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstLd : &MipsBase::InstUnknown;
     case MipsInstId::kLdc:
-      return config_.is_64bit_ ? &MipsBase::InstLdc : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstLdc : &MipsBase::InstUnknown;
     case MipsInstId::kLdl:
-      return config_.is_64bit_ ? &MipsBase::InstLdl : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstLdl : &MipsBase::InstUnknown;
     case MipsInstId::kLdr:
-      return config_.is_64bit_ ? &MipsBase::InstLdr : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstLdr : &MipsBase::InstUnknown;
     case MipsInstId::kLwu:
-      return config_.is_64bit_ ? &MipsBase::InstLwu : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstLwu : &MipsBase::InstUnknown;
     case MipsInstId::kSd:
-      return config_.is_64bit_ ? &MipsBase::InstSd : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstSd : &MipsBase::InstUnknown;
     case MipsInstId::kSdc:
-      return config_.is_64bit_ ? &MipsBase::InstSdc : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstSdc : &MipsBase::InstUnknown;
     case MipsInstId::kSdl:
-      return config_.is_64bit_ ? &MipsBase::InstSdl : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstSdl : &MipsBase::InstUnknown;
     case MipsInstId::kSdr:
-      return config_.is_64bit_ ? &MipsBase::InstSdr : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstSdr : &MipsBase::InstUnknown;
     case MipsInstId::kSync:
-      return config_.is_64bit_ ? &MipsBase::InstSync : &MipsBase::InstUnknown;
+      return kIs64Bit ? &MipsBase::InstSync : &MipsBase::InstUnknown;
     case MipsInstId::kUnknown:
       return &MipsBase::InstUnknown;
   }
   return &MipsBase::InstUnknown;
 }
 
-uint32_t MipsBase::ReadGpr32(int idx) {
+
+MIPS_TEMPLATE
+uint32_t MIPS_BASE::ReadGpr32(int idx) {
   return gpr_[idx];
 }
 
-void MipsBase::WriteGpr32(int idx, uint32_t value) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::WriteGpr32(int idx, uint32_t value) {
   if (idx == 0) {
     return;
   }
-  if (config_.has_load_delay_ && delayed_load_op_.is_active_ && delayed_load_op_.cop_id_ < 0 && delayed_load_op_.dst_ == idx) {
+  if (kHasLoadDelay && delayed_load_op_.is_active_ && delayed_load_op_.cop_id_ < 0 && delayed_load_op_.dst_ == idx) {
     delayed_load_op_.is_active_ = false;
   }
   gpr_[idx] = value;
 }
 
-uint64_t MipsBase::ReadGpr64(int idx) {
-  return config_.is_64bit_ ? gpr_[idx] : sext_i32_to_i64(gpr_[idx] & 0xFFFFFFFF);
+
+MIPS_TEMPLATE
+uint64_t MIPS_BASE::ReadGpr64(int idx) {
+  return kIs64Bit ? gpr_[idx] : sext_i32_to_i64(gpr_[idx] & 0xFFFFFFFF);
 }
 
-void MipsBase::WriteGpr32Sext(int idx, int32_t value) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::WriteGpr32Sext(int idx, int32_t value) {
   if (idx == 0) {
     return;
   }
-  if (config_.has_load_delay_ && delayed_load_op_.is_active_ && delayed_load_op_.cop_id_ < 0 && delayed_load_op_.dst_ == idx) {
+  if (kHasLoadDelay && delayed_load_op_.is_active_ && delayed_load_op_.cop_id_ < 0 && delayed_load_op_.dst_ == idx) {
     delayed_load_op_.is_active_ = false;
   }
   gpr_[idx] = (int64_t)value;
 }
 
-void MipsBase::WriteGpr64(int idx, uint64_t value) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::WriteGpr64(int idx, uint64_t value) {
   if (idx == 0) {
     return;
   }
-  if (config_.has_load_delay_ && delayed_load_op_.is_active_ && delayed_load_op_.cop_id_ < 0 && delayed_load_op_.dst_ == idx) {
+  if (kHasLoadDelay && delayed_load_op_.is_active_ && delayed_load_op_.cop_id_ < 0 && delayed_load_op_.dst_ == idx) {
     delayed_load_op_.is_active_ = false;
   }
   gpr_[idx] = value;
 }
 
-void MipsBase::JumpRel(int32_t offset) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::JumpRel(int32_t offset) {
   has_branch_delay_ = true;
   branch_delay_dst_ = pc_ + 4 + offset;
 
@@ -848,12 +858,16 @@ void MipsBase::JumpRel(int32_t offset) {
   }
 }
 
-void MipsBase::LinkForJump(int dst_reg) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::LinkForJump(int dst_reg) {
   // Sext the address to i64. Zelda OoT expects this I think
   WriteGpr64(dst_reg, sext_i32_to_i64(pc_ + 8));
 }
 
-void MipsBase::Jump32(uint32_t dst) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::Jump32(uint32_t dst) {
   has_branch_delay_ = true;
   branch_delay_dst_ = dst;
 
@@ -863,7 +877,9 @@ void MipsBase::Jump32(uint32_t dst) {
   }
 }
 
-void MipsBase::Jump64(uint64_t dst) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::Jump64(uint64_t dst) {
   has_branch_delay_ = true;
   branch_delay_dst_ = dst;
 
@@ -873,13 +889,15 @@ void MipsBase::Jump64(uint64_t dst) {
   }
 }
 
-void MipsBase::QueueDelayedLoad(int dst, uint64_t value) {
-  if (!config_.has_load_delay_) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::QueueDelayedLoad(int dst, uint64_t value) {
+  if constexpr (!kHasLoadDelay) {
     WriteGpr64(dst, value);
     return;
   }
   if (delayed_load_op_.is_active_) {
-    ExecuteDelayedLoad();
+    if constexpr (kHasLoadDelay) { ExecuteDelayedLoad(); }
     if (delayed_load_op_.is_active_) {
       PANIC("Consecutive loads not handled");
     }
@@ -892,13 +910,15 @@ void MipsBase::QueueDelayedLoad(int dst, uint64_t value) {
   delayed_load_op_.value_ = value;
 }
 
-void MipsBase::QueueDelayedCopLoad(int cop_id, int dst, uint64_t value) {
-  if (!config_.has_load_delay_) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::QueueDelayedCopLoad(int cop_id, int dst, uint64_t value) {
+  if constexpr (!kHasLoadDelay) {
     cop_[cop_id]->Write32(dst, value);
     return;
   }
   if (delayed_load_op_.is_active_) {
-    ExecuteDelayedLoad();
+    if constexpr (kHasLoadDelay) { ExecuteDelayedLoad(); }
     if (delayed_load_op_.is_active_) {
       PANIC("Consecutive loads not handled");
     }
@@ -910,7 +930,9 @@ void MipsBase::QueueDelayedCopLoad(int cop_id, int dst, uint64_t value) {
   delayed_load_op_.value_ = value;
 }
 
-void MipsBase::ExecuteDelayedLoad() {
+
+MIPS_TEMPLATE
+void MIPS_BASE::ExecuteDelayedLoad() {
   if (!delayed_load_op_.is_active_) {
     return;
   }
@@ -935,7 +957,9 @@ void MipsBase::ExecuteDelayedLoad() {
   delayed_load_op_.delay_counter_ = 0;
 }
 
-void MipsBase::TriggerException(ExceptionCause cause) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::TriggerException(ExceptionCause cause) {
   if (!config_.has_exception_) {
     if (cause != ExceptionCause::kOvf && cause != ExceptionCause::kBkpt) {
       fmt::print("Exception not handled : {}\n", static_cast<int>(cause));
@@ -986,7 +1010,7 @@ void MipsBase::TriggerException(ExceptionCause cause) {
 
   uint32_t sr_reg = cop_[0]->Read32Internal(12);
   bool exl = sr_reg & 2;
-  if (config_.is_64bit_) {
+  if (kIs64Bit) {
     // Handle EXL bit
     if (!exl) {
       cop_[0]->Write64Internal(14, epc);
@@ -1021,7 +1045,9 @@ void MipsBase::TriggerException(ExceptionCause cause) {
   }
 }
 
-void MipsBase::CheckHook() {
+
+MIPS_TEMPLATE
+void MIPS_BASE::CheckHook() {
   switch (pc_ & 0xFFFFFFFF) {
     case 0xA0: {
       int func_id = ReadGpr32(9);
@@ -1055,8 +1081,10 @@ void MipsBase::CheckHook() {
   }
 }
 
-bool MipsBase::IsCopEnabled(int cop_id) {
-  if (config_.has_cop0_) {
+
+MIPS_TEMPLATE
+bool MIPS_BASE::IsCopEnabled(int cop_id) {
+  if constexpr (kHasCop0) {
     uint32_t sr = cop_[0]->Read32Internal(12);
     bool cop_enabled = (cop_id == 0) || (sr & (1 << (cop_id + 28)));
     // bool cop_enabled = (cop_id != 1) || (sr & (1 << (cop_id + 28)));
@@ -1068,22 +1096,26 @@ bool MipsBase::IsCopEnabled(int cop_id) {
   return true;
 }
 
-void MipsBase::DumpProcessorLog() {
+
+MIPS_TEMPLATE
+void MIPS_BASE::DumpProcessorLog() {
   if (kLogMipsState) {
-    std::string processor_name = config_.has_cop0_ ? "CPU" : "RSP";
+    std::string processor_name = kHasCop0 ? "CPU" : "RSP";
     fmt::print("===== Processor log dump ({}) =====\n", processor_name);
     for (int i = 0; i < kMipsInstLogCount; i++) {
       int index = (mips_log_index_ + i) % kMipsInstLogCount;
-      fmt::print("{}\n", mips_log_[index].ToString(config_.is_64bit_));
+      fmt::print("{}\n", mips_log_[index].ToString(kIs64Bit));
     }
   }
 }
 
-uint32_t MipsBase::Fetch(uint64_t address) {
-  MipsTlbTranslationResult tlb_result = tlb_->TranslateAddress(address);
+
+MIPS_TEMPLATE
+uint32_t MIPS_BASE::Fetch(uint64_t address) {
+  MipsTlbTranslationResult tlb_result = tlb_.TranslateAddress(address);
   if (!tlb_result.found_) {
     cop_[0]->Write64Internal(8, address);
-    tlb_->InformTlbException(address);
+    tlb_.InformTlbException(address);
     TriggerException(ExceptionCause::kTlbMissLoad);
     return 0;
   }
@@ -1092,11 +1124,13 @@ uint32_t MipsBase::Fetch(uint64_t address) {
   return fetched;
 }
 
-LoadResult8 MipsBase::Load8(uint64_t address) {
-  MipsTlbTranslationResult tlb_result = tlb_->TranslateAddress(address);
+
+MIPS_TEMPLATE
+LoadResult8 MIPS_BASE::Load8(uint64_t address) {
+  MipsTlbTranslationResult tlb_result = tlb_.TranslateAddress(address);
   if (!tlb_result.found_) {
     cop_[0]->Write64Internal(8, address);
-    tlb_->InformTlbException(address);
+    tlb_.InformTlbException(address);
     TriggerException(ExceptionCause::kTlbMissLoad);
     return LoadResult8{.has_value = false, .value = 0};
   }
@@ -1116,11 +1150,13 @@ LoadResult8 MipsBase::Load8(uint64_t address) {
   return result;
 }
 
-LoadResult16 MipsBase::Load16(uint64_t address) {
-  MipsTlbTranslationResult tlb_result = tlb_->TranslateAddress(address);
+
+MIPS_TEMPLATE
+LoadResult16 MIPS_BASE::Load16(uint64_t address) {
+  MipsTlbTranslationResult tlb_result = tlb_.TranslateAddress(address);
   if (!tlb_result.found_) {
     cop_[0]->Write64Internal(8, address);
-    tlb_->InformTlbException(address);
+    tlb_.InformTlbException(address);
     TriggerException(ExceptionCause::kTlbMissLoad);
     return LoadResult16{.has_value = false, .value = 0};
   }
@@ -1140,11 +1176,13 @@ LoadResult16 MipsBase::Load16(uint64_t address) {
   return result;
 }
 
-LoadResult32 MipsBase::Load32(uint64_t address) {
-  MipsTlbTranslationResult tlb_result = tlb_->TranslateAddress(address);
+
+MIPS_TEMPLATE
+LoadResult32 MIPS_BASE::Load32(uint64_t address) {
+  MipsTlbTranslationResult tlb_result = tlb_.TranslateAddress(address);
   if (!tlb_result.found_) {
     cop_[0]->Write64Internal(8, address);
-    tlb_->InformTlbException(address);
+    tlb_.InformTlbException(address);
     TriggerException(ExceptionCause::kTlbMissLoad);
     return LoadResult32{.has_value = false, .value = 0};
   }
@@ -1164,11 +1202,13 @@ LoadResult32 MipsBase::Load32(uint64_t address) {
   return result;
 }
 
-LoadResult64 MipsBase::Load64(uint64_t address) {
-  MipsTlbTranslationResult tlb_result = tlb_->TranslateAddress(address);
+
+MIPS_TEMPLATE
+LoadResult64 MIPS_BASE::Load64(uint64_t address) {
+  MipsTlbTranslationResult tlb_result = tlb_.TranslateAddress(address);
   if (!tlb_result.found_) {
     cop_[0]->Write64Internal(8, address);
-    tlb_->InformTlbException(address);
+    tlb_.InformTlbException(address);
     TriggerException(ExceptionCause::kTlbMissLoad);
     return LoadResult64{.has_value = false, .value = 0};
   }
@@ -1188,21 +1228,23 @@ LoadResult64 MipsBase::Load64(uint64_t address) {
   return result;
 }
 
-void MipsBase::Store8(uint64_t address, uint8_t value) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::Store8(uint64_t address, uint8_t value) {
   if (config_.has_isolate_cache_bit_ && (cop_[0]->Read32Internal(12) & (1 << 16))) {
     return;
   }
 
-  MipsTlbTranslationResult tlb_result = tlb_->TranslateAddress(address);
+  MipsTlbTranslationResult tlb_result = tlb_.TranslateAddress(address);
   if (!tlb_result.found_) {
     cop_[0]->Write64Internal(8, address);
-    tlb_->InformTlbException(address);
+    tlb_.InformTlbException(address);
     TriggerException(ExceptionCause::kTlbMissStore);
     return;
   }
   if (tlb_result.read_only_) {
     cop_[0]->Write64Internal(8, address);
-    tlb_->InformTlbException(address);
+    tlb_.InformTlbException(address);
     TriggerException(ExceptionCause::kTlbMod);
     return;
   }
@@ -1235,21 +1277,23 @@ void MipsBase::Store8(uint64_t address, uint8_t value) {
   }
 }
 
-void MipsBase::Store16(uint64_t address, uint16_t value) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::Store16(uint64_t address, uint16_t value) {
   if (config_.has_isolate_cache_bit_ && (cop_[0]->Read32Internal(12) & (1 << 16))) {
     return;
   }
 
-  MipsTlbTranslationResult tlb_result = tlb_->TranslateAddress(address);
+  MipsTlbTranslationResult tlb_result = tlb_.TranslateAddress(address);
   if (!tlb_result.found_) {
     cop_[0]->Write64Internal(8, address);
-    tlb_->InformTlbException(address);
+    tlb_.InformTlbException(address);
     TriggerException(ExceptionCause::kTlbMissStore);
     return;
   }
   if (tlb_result.read_only_) {
     cop_[0]->Write64Internal(8, address);
-    tlb_->InformTlbException(address);
+    tlb_.InformTlbException(address);
     TriggerException(ExceptionCause::kTlbMod);
     return;
   }
@@ -1282,21 +1326,23 @@ void MipsBase::Store16(uint64_t address, uint16_t value) {
   }
 }
 
-void MipsBase::Store32(uint64_t address, uint32_t value) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::Store32(uint64_t address, uint32_t value) {
   if (config_.has_isolate_cache_bit_ && (cop_[0]->Read32Internal(12) & (1 << 16))) {
     return;
   }
 
-  MipsTlbTranslationResult tlb_result = tlb_->TranslateAddress(address);
+  MipsTlbTranslationResult tlb_result = tlb_.TranslateAddress(address);
   if (!tlb_result.found_) {
     cop_[0]->Write64Internal(8, address);
-    tlb_->InformTlbException(address);
+    tlb_.InformTlbException(address);
     TriggerException(ExceptionCause::kTlbMissStore);
     return;
   }
   if (tlb_result.read_only_) {
     cop_[0]->Write64Internal(8, address);
-    tlb_->InformTlbException(address);
+    tlb_.InformTlbException(address);
     TriggerException(ExceptionCause::kTlbMod);
     return;
   }
@@ -1329,21 +1375,23 @@ void MipsBase::Store32(uint64_t address, uint32_t value) {
   }
 }
 
-void MipsBase::Store64(uint64_t address, uint64_t value) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::Store64(uint64_t address, uint64_t value) {
   if (config_.has_isolate_cache_bit_ && (cop_[0]->Read32Internal(12) & (1 << 16))) {
     return;
   }
 
-  MipsTlbTranslationResult tlb_result = tlb_->TranslateAddress(address);
+  MipsTlbTranslationResult tlb_result = tlb_.TranslateAddress(address);
   if (!tlb_result.found_) {
     cop_[0]->Write64Internal(8, address);
-    tlb_->InformTlbException(address);
+    tlb_.InformTlbException(address);
     TriggerException(ExceptionCause::kTlbMissStore);
     return;
   }
   if (tlb_result.read_only_) {
     cop_[0]->Write64Internal(8, address);
-    tlb_->InformTlbException(address);
+    tlb_.InformTlbException(address);
     TriggerException(ExceptionCause::kTlbMod);
     return;
   }
@@ -1360,11 +1408,13 @@ void MipsBase::Store64(uint64_t address, uint64_t value) {
   }
 }
 
-void MipsBase::OnNewBlock(uint64_t address) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::OnNewBlock(uint64_t address) {
   address &= 0xFFFFFFFF;
 
-  auto& cache = GetMipsCache();
-  MipsCacheBlock block;
+  auto& cache = cache_;
+  MipsCacheBlock<MipsBase> block;
   block.start_ = address;
 
   int block_length = 0;
@@ -1377,7 +1427,7 @@ void MipsBase::OnNewBlock(uint64_t address) {
 
   for (int i = 0; i < kCacheBlockMaxLength - 1; i++) {
     uint32_t opcode = Fetch(inst_address);
-    MipsCacheEntry entry;
+    MipsCacheEntry<MipsBase> entry;
     entry.address_ = inst_address;
     entry.opcode_ = opcode;
     entry.func_ = GetInstFuncPtr(opcode);
@@ -1392,7 +1442,7 @@ void MipsBase::OnNewBlock(uint64_t address) {
 
   if (has_delay_slot) {
     uint64_t delay_slot_inst_ = Fetch(inst_address);
-    MipsCacheEntry delay_slot_entry;
+    MipsCacheEntry<MipsBase> delay_slot_entry;
     delay_slot_entry.address_ = inst_address;
     delay_slot_entry.opcode_ = delay_slot_inst_;
     delay_slot_entry.func_ = GetInstFuncPtr(delay_slot_inst_);
@@ -1409,22 +1459,26 @@ void MipsBase::OnNewBlock(uint64_t address) {
   if (false) {
     fmt::print("New block #{}: {:08X}-{:08X} ({} inst)\n", cache.GetSize(), address, inst_address, block_length);
     for (int i = 0; i < block_length; i++) {
-      const MipsCacheEntry& entry = block.entries_[i];
+      const MipsCacheEntry<MipsBase>& entry = block.entries_[i];
       fmt::print("{:08X} | {}\n", entry.address_, MipsInst(entry.opcode_).Disassemble(entry.address_));
     }
   }
 }
 
-void MipsBase::InvalidateBlock(uint64_t address) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InvalidateBlock(uint64_t address) {
   if (!config_.use_cached_interpreter_) {
     return;
   }
 
   address &= 0xFFFFFFFF;
-  GetMipsCache().InvalidateBlock(address);
+  cache_.InvalidateBlock(address);
 }
 
-void MipsBase::InstAdd(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstAdd(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   uint32_t rs_value = ReadGpr32(inst.rs());
   uint32_t rt_value = ReadGpr32(inst.rt());
@@ -1436,7 +1490,9 @@ void MipsBase::InstAdd(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstAddu(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstAddu(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   uint32_t rs_value = ReadGpr32(inst.rs());
   uint32_t rt_value = ReadGpr32(inst.rt());
@@ -1444,7 +1500,9 @@ void MipsBase::InstAddu(uint32_t opcode) {
   WriteGpr32Sext(inst.rd(), rd_value);
 }
 
-void MipsBase::InstAddi(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstAddi(uint32_t opcode) {
   ITypeInst inst = MipsInst(opcode).GetIType();
   uint32_t rs_value = ReadGpr32(inst.rs());
   uint32_t imm = sext_itype_imm_i32(inst);
@@ -1456,7 +1514,9 @@ void MipsBase::InstAddi(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstAddiu(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstAddiu(uint32_t opcode) {
   ITypeInst inst = MipsInst(opcode).GetIType();
   uint32_t rs_value = ReadGpr32(inst.rs());
   uint32_t imm = sext_itype_imm_i32(inst);
@@ -1464,7 +1524,9 @@ void MipsBase::InstAddiu(uint32_t opcode) {
   WriteGpr32Sext(inst.rt(), rt_value);
 }
 
-void MipsBase::InstAnd(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstAnd(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   uint64_t rs_value = ReadGpr64(inst.rs());
   uint64_t rt_value = ReadGpr64(inst.rt());
@@ -1472,7 +1534,9 @@ void MipsBase::InstAnd(uint32_t opcode) {
   WriteGpr64(inst.rd(), rd_value);
 }
 
-void MipsBase::InstAndi(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstAndi(uint32_t opcode) {
   ITypeInst inst = MipsInst(opcode).GetIType();
   uint64_t rs_value = ReadGpr64(inst.rs());
   uint16_t imm = inst.imm();
@@ -1482,7 +1546,9 @@ void MipsBase::InstAndi(uint32_t opcode) {
   // fmt::print("andi | {:08X} AND {:08X} = {:08X}\n", rs_value, imm, rt_value);
 }
 
-void MipsBase::InstDiv(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstDiv(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   int32_t rs_value = ReadGpr32(inst.rs());
   int32_t rt_value = ReadGpr32(inst.rt());
@@ -1505,7 +1571,9 @@ void MipsBase::InstDiv(uint32_t opcode) {
   hi_ = sext_i32_to_i64(hi);
 }
 
-void MipsBase::InstDivu(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstDivu(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   uint32_t rs_value = ReadGpr32(inst.rs());
   uint32_t rt_value = ReadGpr32(inst.rt());
@@ -1522,7 +1590,9 @@ void MipsBase::InstDivu(uint32_t opcode) {
   hi_ = sext_i32_to_i64(hi);
 }
 
-void MipsBase::InstMult(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstMult(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   uint32_t rs_value = ReadGpr32(inst.rs());
   uint32_t rt_value = ReadGpr32(inst.rt());
@@ -1533,7 +1603,9 @@ void MipsBase::InstMult(uint32_t opcode) {
   lo_ = sext_i32_to_i64(result & 0xFFFFFFFF);
 }
 
-void MipsBase::InstMultu(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstMultu(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   uint32_t rs_value = ReadGpr32(inst.rs());
   uint32_t rt_value = ReadGpr32(inst.rt());
@@ -1544,7 +1616,9 @@ void MipsBase::InstMultu(uint32_t opcode) {
   lo_ = sext_i32_to_i64(result & 0xFFFFFFFF);
 }
 
-void MipsBase::InstNor(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstNor(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   uint64_t rs_value = ReadGpr64(inst.rs());
   uint64_t rt_value = ReadGpr64(inst.rt());
@@ -1552,7 +1626,9 @@ void MipsBase::InstNor(uint32_t opcode) {
   WriteGpr64(inst.rd(), rd_value);
 }
 
-void MipsBase::InstOr(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstOr(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   uint64_t rs_value = ReadGpr64(inst.rs());
   uint64_t rt_value = ReadGpr64(inst.rt());
@@ -1560,7 +1636,9 @@ void MipsBase::InstOr(uint32_t opcode) {
   WriteGpr64(inst.rd(), rd_value);
 }
 
-void MipsBase::InstOri(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstOri(uint32_t opcode) {
   ITypeInst inst = MipsInst(opcode).GetIType();
   uint64_t rs_value = ReadGpr64(inst.rs());
   uint16_t imm = inst.imm();
@@ -1568,7 +1646,9 @@ void MipsBase::InstOri(uint32_t opcode) {
   WriteGpr64(inst.rt(), rt_value);
 }
 
-void MipsBase::InstSll(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstSll(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   uint32_t rt_value = ReadGpr32(inst.rt());
   if (inst.shamt() == 0) {
@@ -1579,7 +1659,9 @@ void MipsBase::InstSll(uint32_t opcode) {
   WriteGpr32Sext(inst.rd(), rd_value);
 }
 
-void MipsBase::InstSllv(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstSllv(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   uint32_t rt_value = ReadGpr32(inst.rt());
   uint32_t rs_value = ReadGpr32(inst.rs());
@@ -1587,7 +1669,9 @@ void MipsBase::InstSllv(uint32_t opcode) {
   WriteGpr32Sext(inst.rd(), rd_value);
 }
 
-void MipsBase::InstSra(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstSra(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   // NOTE: This is actually incorrect for VR4300. It shifts 64bit value, making upper 32bit of rt relavant
   int32_t rt_value = ReadGpr32(inst.rt());
@@ -1595,7 +1679,9 @@ void MipsBase::InstSra(uint32_t opcode) {
   WriteGpr32Sext(inst.rd(), rd_value);
 }
 
-void MipsBase::InstSrav(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstSrav(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   // NOTE: Same as sra.
   int32_t rt_value = ReadGpr32(inst.rt());
@@ -1604,14 +1690,18 @@ void MipsBase::InstSrav(uint32_t opcode) {
   WriteGpr32Sext(inst.rd(), rd_value);
 }
 
-void MipsBase::InstSrl(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstSrl(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   uint32_t rt_value = ReadGpr32(inst.rt());
   uint32_t rd_value = rt_value >> inst.shamt();
   WriteGpr32Sext(inst.rd(), rd_value);
 }
 
-void MipsBase::InstSrlv(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstSrlv(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   uint32_t rt_value = ReadGpr32(inst.rt());
   uint32_t rs_value = ReadGpr32(inst.rs());
@@ -1619,7 +1709,9 @@ void MipsBase::InstSrlv(uint32_t opcode) {
   WriteGpr32Sext(inst.rd(), rd_value);
 }
 
-void MipsBase::InstSub(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstSub(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   uint32_t rs_value = ReadGpr32(inst.rs());
   uint32_t rt_value = ReadGpr32(inst.rt());
@@ -1631,7 +1723,9 @@ void MipsBase::InstSub(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstSubu(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstSubu(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   uint32_t rs_value = ReadGpr32(inst.rs());
   uint32_t rt_value = ReadGpr32(inst.rt());
@@ -1639,7 +1733,9 @@ void MipsBase::InstSubu(uint32_t opcode) {
   WriteGpr32Sext(inst.rd(), rd_value);
 }
 
-void MipsBase::InstXor(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstXor(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   uint64_t rs_value = ReadGpr64(inst.rs());
   uint64_t rt_value = ReadGpr64(inst.rt());
@@ -1647,7 +1743,9 @@ void MipsBase::InstXor(uint32_t opcode) {
   WriteGpr64(inst.rd(), rd_value);
 }
 
-void MipsBase::InstXori(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstXori(uint32_t opcode) {
   ITypeInst inst = MipsInst(opcode).GetIType();
   uint64_t rs_value = ReadGpr64(inst.rs());
   uint16_t imm = inst.imm();
@@ -1655,14 +1753,18 @@ void MipsBase::InstXori(uint32_t opcode) {
   WriteGpr64(inst.rt(), rt_value);
 }
 
-void MipsBase::InstLui(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstLui(uint32_t opcode) {
   ITypeInst inst = MipsInst(opcode).GetIType();
   uint32_t imm = inst.imm();
   uint32_t rt_value = imm << 16;
   WriteGpr32Sext(inst.rt(), rt_value);
 }
 
-void MipsBase::InstSlt(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstSlt(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   int64_t rs_value = ReadGpr64(inst.rs());
   int64_t rt_value = ReadGpr64(inst.rt());
@@ -1670,7 +1772,9 @@ void MipsBase::InstSlt(uint32_t opcode) {
   WriteGpr32(inst.rd(), rd_value);
 }
 
-void MipsBase::InstSltu(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstSltu(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   uint64_t rs_value = ReadGpr64(inst.rs());
   uint64_t rt_value = ReadGpr64(inst.rt());
@@ -1678,7 +1782,9 @@ void MipsBase::InstSltu(uint32_t opcode) {
   WriteGpr32(inst.rd(), rd_value);
 }
 
-void MipsBase::InstSlti(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstSlti(uint32_t opcode) {
   ITypeInst inst = MipsInst(opcode).GetIType();
   int64_t rs_value = ReadGpr64(inst.rs());
   int32_t imm = sext_itype_imm_i32(inst);
@@ -1686,7 +1792,9 @@ void MipsBase::InstSlti(uint32_t opcode) {
   WriteGpr32(inst.rt(), rt_value);
 }
 
-void MipsBase::InstSltiu(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstSltiu(uint32_t opcode) {
   ITypeInst inst = MipsInst(opcode).GetIType();
   uint64_t rs_value = ReadGpr64(inst.rs());
   uint64_t imm = sext_itype_imm_i64(inst);
@@ -1694,9 +1802,11 @@ void MipsBase::InstSltiu(uint32_t opcode) {
   WriteGpr32(inst.rt(), rt_value);
 }
 
-void MipsBase::InstBeq(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstBeq(uint32_t opcode) {
   // HACK: No load delay on branch
-  ExecuteDelayedLoad();
+  if constexpr (kHasLoadDelay) { ExecuteDelayedLoad(); }
 
   if (kEnableIdleLoopDetection && (opcode == 0x1000FFFF)) {
     uint32_t delay_op = Fetch(pc_ + 4);
@@ -1714,9 +1824,11 @@ void MipsBase::InstBeq(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstBne(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstBne(uint32_t opcode) {
   // HACK: No load delay on branch
-  ExecuteDelayedLoad();
+  if constexpr (kHasLoadDelay) { ExecuteDelayedLoad(); }
 
   ITypeInst inst = MipsInst(opcode).GetIType();
   int64_t rs_value = ReadGpr64(inst.rs());
@@ -1726,9 +1838,11 @@ void MipsBase::InstBne(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstBgtz(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstBgtz(uint32_t opcode) {
   // HACK: No load delay on branch
-  ExecuteDelayedLoad();
+  if constexpr (kHasLoadDelay) { ExecuteDelayedLoad(); }
 
   ITypeInst inst = MipsInst(opcode).GetIType();
   int64_t rs_value = ReadGpr64(inst.rs());
@@ -1737,9 +1851,11 @@ void MipsBase::InstBgtz(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstBlez(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstBlez(uint32_t opcode) {
   // HACK: No load delay on branch
-  ExecuteDelayedLoad();
+  if constexpr (kHasLoadDelay) { ExecuteDelayedLoad(); }
 
   ITypeInst inst = MipsInst(opcode).GetIType();
   int64_t rs_value = ReadGpr64(inst.rs());
@@ -1748,9 +1864,11 @@ void MipsBase::InstBlez(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstBgez(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstBgez(uint32_t opcode) {
   // HACK: No load delay on branch
-  ExecuteDelayedLoad();
+  if constexpr (kHasLoadDelay) { ExecuteDelayedLoad(); }
 
   ITypeInst inst = MipsInst(opcode).GetIType();
   int64_t rs_value = ReadGpr64(inst.rs());
@@ -1759,9 +1877,11 @@ void MipsBase::InstBgez(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstBgezal(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstBgezal(uint32_t opcode) {
   // HACK: No load delay on branch
-  ExecuteDelayedLoad();
+  if constexpr (kHasLoadDelay) { ExecuteDelayedLoad(); }
 
   ITypeInst inst = MipsInst(opcode).GetIType();
   int64_t rs_value = ReadGpr64(inst.rs());
@@ -1771,9 +1891,11 @@ void MipsBase::InstBgezal(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstBltz(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstBltz(uint32_t opcode) {
   // HACK: No load delay on branch
-  ExecuteDelayedLoad();
+  if constexpr (kHasLoadDelay) { ExecuteDelayedLoad(); }
 
   ITypeInst inst = MipsInst(opcode).GetIType();
   int64_t rs_value = ReadGpr64(inst.rs());
@@ -1782,9 +1904,11 @@ void MipsBase::InstBltz(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstBltzal(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstBltzal(uint32_t opcode) {
   // HACK: No load delay on branch
-  ExecuteDelayedLoad();
+  if constexpr (kHasLoadDelay) { ExecuteDelayedLoad(); }
 
   ITypeInst inst = MipsInst(opcode).GetIType();
   int64_t rs_value = ReadGpr64(inst.rs());
@@ -1794,7 +1918,9 @@ void MipsBase::InstBltzal(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstJ(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstJ(uint32_t opcode) {
   JTypeInst inst = MipsInst(opcode).GetJType();
   uint32_t dst = ((pc_ + 4) & 0xF0000000) | (inst.address() << 2);
   Jump32(dst);
@@ -1808,14 +1934,18 @@ void MipsBase::InstJ(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstJal(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstJal(uint32_t opcode) {
   JTypeInst inst = MipsInst(opcode).GetJType();
   uint32_t dst = ((pc_ + 4) & 0xF0000000) | (inst.address() << 2);
   LinkForJump(31);
   Jump32(dst);
 }
 
-void MipsBase::InstJr(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstJr(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   uint64_t rs_value = ReadGpr64(inst.rs());
   // if (!config_.allow_misaligned_access_ && (rs_value & 3)) {
@@ -1830,7 +1960,9 @@ void MipsBase::InstJr(uint32_t opcode) {
   Jump64(rs_value);
 }
 
-void MipsBase::InstJalr(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstJalr(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   uint64_t rs_value = ReadGpr64(inst.rs());
   // if (!config_.allow_misaligned_access_ && (rs_value & 3)) {
@@ -1846,20 +1978,26 @@ void MipsBase::InstJalr(uint32_t opcode) {
   Jump64(rs_value);
 }
 
-void MipsBase::InstSyscall(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstSyscall(uint32_t opcode) {
   TriggerException(ExceptionCause::kSyscall);
 }
 
-void MipsBase::InstBreak(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstBreak(uint32_t opcode) {
   TriggerException(ExceptionCause::kBkpt);
 
-  if (!config_.has_cop0_) {
+  if constexpr (!kHasCop0) {
     // HACK: signal to cop0
     cop_[0]->Command(0);
   }
 }
 
-void MipsBase::InstLb(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstLb(uint32_t opcode) {
   ITypeInst inst = MipsInst(opcode).GetIType();
   uint64_t rs_value = ReadGpr64(inst.rs());
   int32_t imm = sext_itype_imm_i32(inst);
@@ -1871,7 +2009,9 @@ void MipsBase::InstLb(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstLbu(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstLbu(uint32_t opcode) {
   ITypeInst inst = MipsInst(opcode).GetIType();
   uint64_t rs_value = ReadGpr64(inst.rs());
   int32_t imm = sext_itype_imm_i32(inst);
@@ -1883,7 +2023,9 @@ void MipsBase::InstLbu(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstLh(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstLh(uint32_t opcode) {
   ITypeInst inst = MipsInst(opcode).GetIType();
   uint64_t rs_value = ReadGpr64(inst.rs());
   int32_t imm = sext_itype_imm_i32(inst);
@@ -1900,7 +2042,9 @@ void MipsBase::InstLh(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstLhu(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstLhu(uint32_t opcode) {
   ITypeInst inst = MipsInst(opcode).GetIType();
   uint64_t rs_value = ReadGpr64(inst.rs());
   int32_t imm = sext_itype_imm_i32(inst);
@@ -1917,7 +2061,9 @@ void MipsBase::InstLhu(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstLw(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstLw(uint32_t opcode) {
   ITypeInst inst = MipsInst(opcode).GetIType();
   uint64_t rs_value = ReadGpr64(inst.rs());
   int32_t imm = sext_itype_imm_i32(inst);
@@ -1934,9 +2080,11 @@ void MipsBase::InstLw(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstLwl(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstLwl(uint32_t opcode) {
   // HACK: Execute pending load
-  ExecuteDelayedLoad();
+  if constexpr (kHasLoadDelay) { ExecuteDelayedLoad(); }
 
   ITypeInst inst = MipsInst(opcode).GetIType();
   uint64_t rs_value = ReadGpr64(inst.rs());
@@ -1961,9 +2109,11 @@ void MipsBase::InstLwl(uint32_t opcode) {
   WriteGpr32Sext(inst.rt(), rt_value);
 }
 
-void MipsBase::InstLwr(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstLwr(uint32_t opcode) {
   // HACK: Execute pending load
-  ExecuteDelayedLoad();
+  if constexpr (kHasLoadDelay) { ExecuteDelayedLoad(); }
 
   ITypeInst inst = MipsInst(opcode).GetIType();
   uint64_t rs_value = ReadGpr64(inst.rs());
@@ -1989,7 +2139,9 @@ void MipsBase::InstLwr(uint32_t opcode) {
   WriteGpr32Sext(inst.rt(), rt_value);
 }
 
-void MipsBase::InstLwc(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstLwc(uint32_t opcode) {
   uint8_t cop_id = (opcode >> 26) & 3;
   if (config_.cop_decoding_override_ & (1 << cop_id)) {
     InstCop(opcode);
@@ -2013,7 +2165,9 @@ void MipsBase::InstLwc(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstSb(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstSb(uint32_t opcode) {
   ITypeInst inst = MipsInst(opcode).GetIType();
   uint64_t rs_value = ReadGpr64(inst.rs());
   int32_t imm = sext_itype_imm_i32(inst);
@@ -2022,7 +2176,9 @@ void MipsBase::InstSb(uint32_t opcode) {
   Store8(address, rt_value);
 }
 
-void MipsBase::InstSh(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstSh(uint32_t opcode) {
   ITypeInst inst = MipsInst(opcode).GetIType();
   uint64_t rs_value = ReadGpr64(inst.rs());
   int32_t imm = sext_itype_imm_i32(inst);
@@ -2036,7 +2192,9 @@ void MipsBase::InstSh(uint32_t opcode) {
   Store16(address, rt_value);
 }
 
-void MipsBase::InstSw(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstSw(uint32_t opcode) {
   ITypeInst inst = MipsInst(opcode).GetIType();
   uint64_t rs_value = ReadGpr64(inst.rs());
   int32_t imm = sext_itype_imm_i32(inst);
@@ -2050,7 +2208,9 @@ void MipsBase::InstSw(uint32_t opcode) {
   Store32(address, rt_value);
 }
 
-void MipsBase::InstSwl(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstSwl(uint32_t opcode) {
   ITypeInst inst = MipsInst(opcode).GetIType();
   uint64_t rs_value = ReadGpr64(inst.rs());
   int32_t imm = sext_itype_imm_i32(inst);
@@ -2068,7 +2228,9 @@ void MipsBase::InstSwl(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstSwr(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstSwr(uint32_t opcode) {
   ITypeInst inst = MipsInst(opcode).GetIType();
   uint64_t rs_value = ReadGpr64(inst.rs());
   int32_t imm = sext_itype_imm_i32(inst);
@@ -2087,7 +2249,9 @@ void MipsBase::InstSwr(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstSwc(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstSwc(uint32_t opcode) {
   uint8_t cop_id = (opcode >> 26) & 3;
   if (config_.cop_decoding_override_ & (1 << cop_id)) {
     InstCop(opcode);
@@ -2108,29 +2272,39 @@ void MipsBase::InstSwc(uint32_t opcode) {
   Store32(address, copt_value);
 }
 
-void MipsBase::InstMfhi(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstMfhi(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   WriteGpr64(inst.rd(), hi_);
 }
 
-void MipsBase::InstMflo(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstMflo(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   WriteGpr64(inst.rd(), lo_);
 }
 
-void MipsBase::InstMthi(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstMthi(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   uint64_t rs_value = ReadGpr64(inst.rs());
   hi_ = rs_value;
 }
 
-void MipsBase::InstMtlo(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstMtlo(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   uint64_t rs_value = ReadGpr64(inst.rs());
   lo_ = rs_value;
 }
 
-void MipsBase::InstCop(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstCop(uint32_t opcode) {
   uint8_t cop_id = (opcode >> 26) & 3;
   if (!IsCopEnabled(cop_id)) {
     cop_cause_ = cop_id;
@@ -2150,7 +2324,9 @@ void MipsBase::InstCop(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstMfc(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstMfc(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   uint8_t cop_id = (opcode >> 26) & 3;
 
@@ -2169,7 +2345,9 @@ void MipsBase::InstMfc(uint32_t opcode) {
   WriteGpr32Sext(inst.rt(), cop_value);
 }
 
-void MipsBase::InstCfc(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstCfc(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   uint8_t cop_id = (opcode >> 26) & 3;
 
@@ -2188,7 +2366,9 @@ void MipsBase::InstCfc(uint32_t opcode) {
   WriteGpr32Sext(inst.rt(), cop_value);
 }
 
-void MipsBase::InstMtc(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstMtc(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   uint8_t cop_id = (opcode >> 26) & 3;
 
@@ -2212,7 +2392,9 @@ void MipsBase::InstMtc(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstCtc(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstCtc(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   uint8_t cop_id = (opcode >> 26) & 3;
 
@@ -2231,10 +2413,14 @@ void MipsBase::InstCtc(uint32_t opcode) {
   cop_[cop_id]->Write32(inst.rd() + 32, rt_value);
 }
 
-void MipsBase::InstNop(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstNop(uint32_t opcode) {
 }
 
-void MipsBase::InstBcf(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstBcf(uint32_t opcode) {
   ITypeInst inst = MipsInst(opcode).GetIType();
   uint8_t cop_id = (opcode >> 26) & 3;
   if (!IsCopEnabled(cop_id)) {
@@ -2247,7 +2433,9 @@ void MipsBase::InstBcf(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstBcfl(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstBcfl(uint32_t opcode) {
   ITypeInst inst = MipsInst(opcode).GetIType();
   uint8_t cop_id = (opcode >> 26) & 3;
   if (!IsCopEnabled(cop_id)) {
@@ -2262,7 +2450,9 @@ void MipsBase::InstBcfl(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstBct(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstBct(uint32_t opcode) {
   ITypeInst inst = MipsInst(opcode).GetIType();
   uint8_t cop_id = (opcode >> 26) & 3;
   if (!IsCopEnabled(cop_id)) {
@@ -2275,7 +2465,9 @@ void MipsBase::InstBct(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstBctl(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstBctl(uint32_t opcode) {
   ITypeInst inst = MipsInst(opcode).GetIType();
   uint8_t cop_id = (opcode >> 26) & 3;
   if (!IsCopEnabled(cop_id)) {
@@ -2290,7 +2482,9 @@ void MipsBase::InstBctl(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstBeql(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstBeql(uint32_t opcode) {
   ITypeInst inst = MipsInst(opcode).GetIType();
   int64_t rs_value = ReadGpr64(inst.rs());
   int64_t rt_value = ReadGpr64(inst.rt());
@@ -2301,7 +2495,9 @@ void MipsBase::InstBeql(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstBnel(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstBnel(uint32_t opcode) {
   ITypeInst inst = MipsInst(opcode).GetIType();
   int64_t rs_value = ReadGpr64(inst.rs());
   int64_t rt_value = ReadGpr64(inst.rt());
@@ -2312,7 +2508,9 @@ void MipsBase::InstBnel(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstBgezl(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstBgezl(uint32_t opcode) {
   ITypeInst inst = MipsInst(opcode).GetIType();
   int64_t rs_value = ReadGpr64(inst.rs());
   if (rs_value >= 0) {
@@ -2322,7 +2520,9 @@ void MipsBase::InstBgezl(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstBgezall(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstBgezall(uint32_t opcode) {
   ITypeInst inst = MipsInst(opcode).GetIType();
   int64_t rs_value = ReadGpr64(inst.rs());
   LinkForJump(31);
@@ -2333,7 +2533,9 @@ void MipsBase::InstBgezall(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstBgtzl(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstBgtzl(uint32_t opcode) {
   ITypeInst inst = MipsInst(opcode).GetIType();
   int64_t rs_value = ReadGpr64(inst.rs());
   if (rs_value > 0) {
@@ -2343,7 +2545,9 @@ void MipsBase::InstBgtzl(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstBlezl(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstBlezl(uint32_t opcode) {
   ITypeInst inst = MipsInst(opcode).GetIType();
   int64_t rs_value = ReadGpr64(inst.rs());
   if (rs_value <= 0) {
@@ -2353,7 +2557,9 @@ void MipsBase::InstBlezl(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstBltzl(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstBltzl(uint32_t opcode) {
   ITypeInst inst = MipsInst(opcode).GetIType();
   int64_t rs_value = ReadGpr64(inst.rs());
   if (rs_value < 0) {
@@ -2363,7 +2569,9 @@ void MipsBase::InstBltzl(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstBltzall(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstBltzall(uint32_t opcode) {
   ITypeInst inst = MipsInst(opcode).GetIType();
   int64_t rs_value = ReadGpr64(inst.rs());
   LinkForJump(31);
@@ -2374,7 +2582,9 @@ void MipsBase::InstBltzall(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstCache(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstCache(uint32_t opcode) {
   int16_t offset = opcode;
   uint8_t op = (opcode >> 16) & 0x1F;
   uint8_t base = (opcode >> 21) & 0x1F;
@@ -2389,11 +2599,13 @@ void MipsBase::InstCache(uint32_t opcode) {
   if (config_.use_cached_interpreter_) {
     uint64_t line_start = address & ~0x1F;
     uint64_t line_end = line_start + 32;
-    GetMipsCache().InvalidateBlockRange(line_start, line_end);
+    cache_.InvalidateBlockRange(line_start, line_end);
   }
 }
 
-void MipsBase::InstDadd(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstDadd(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   uint64_t rs_value = ReadGpr64(inst.rs());
   uint64_t rt_value = ReadGpr64(inst.rt());
@@ -2405,7 +2617,9 @@ void MipsBase::InstDadd(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstDaddu(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstDaddu(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   uint64_t rs_value = ReadGpr64(inst.rs());
   uint64_t rt_value = ReadGpr64(inst.rt());
@@ -2413,7 +2627,9 @@ void MipsBase::InstDaddu(uint32_t opcode) {
   WriteGpr64(inst.rd(), rd_value);
 }
 
-void MipsBase::InstDaddi(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstDaddi(uint32_t opcode) {
   ITypeInst inst = MipsInst(opcode).GetIType();
   uint64_t rs_value = ReadGpr64(inst.rs());
   int32_t imm = sext_itype_imm_i32(inst);
@@ -2425,7 +2641,9 @@ void MipsBase::InstDaddi(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstDaddiu(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstDaddiu(uint32_t opcode) {
   ITypeInst inst = MipsInst(opcode).GetIType();
   uint64_t rs_value = ReadGpr64(inst.rs());
   int32_t imm = sext_itype_imm_i32(inst);
@@ -2433,7 +2651,9 @@ void MipsBase::InstDaddiu(uint32_t opcode) {
   WriteGpr64(inst.rt(), rt_value);
 }
 
-void MipsBase::InstDsub(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstDsub(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   uint64_t rs_value = ReadGpr64(inst.rs());
   uint64_t rt_value = ReadGpr64(inst.rt());
@@ -2445,7 +2665,9 @@ void MipsBase::InstDsub(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstDsubu(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstDsubu(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   uint64_t rs_value = ReadGpr64(inst.rs());
   uint64_t rt_value = ReadGpr64(inst.rt());
@@ -2453,7 +2675,9 @@ void MipsBase::InstDsubu(uint32_t opcode) {
   WriteGpr64(inst.rd(), rd_value);
 }
 
-void MipsBase::InstDmult(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstDmult(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   uint64_t rs_value = ReadGpr64(inst.rs());
   uint64_t rt_value = ReadGpr64(inst.rt());
@@ -2464,7 +2688,9 @@ void MipsBase::InstDmult(uint32_t opcode) {
   lo_ = result & 0xFFFFFFFFFFFFFFFFULL;
 }
 
-void MipsBase::InstDmultu(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstDmultu(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   uint128_t rs_value = ReadGpr64(inst.rs());
   uint128_t rt_value = ReadGpr64(inst.rt());
@@ -2473,7 +2699,9 @@ void MipsBase::InstDmultu(uint32_t opcode) {
   lo_ = result & 0xFFFFFFFFFFFFFFFFULL;
 }
 
-void MipsBase::InstDdiv(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstDdiv(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   int64_t rs_value = ReadGpr64(inst.rs());
   int64_t rt_value = ReadGpr64(inst.rt());
@@ -2496,7 +2724,9 @@ void MipsBase::InstDdiv(uint32_t opcode) {
   hi_ = hi;
 }
 
-void MipsBase::InstDdivu(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstDdivu(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   uint64_t rs_value = ReadGpr64(inst.rs());
   uint64_t rt_value = ReadGpr64(inst.rt());
@@ -2513,7 +2743,9 @@ void MipsBase::InstDdivu(uint32_t opcode) {
   hi_ = hi;
 }
 
-void MipsBase::InstDsll(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstDsll(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   uint64_t rt_value = ReadGpr64(inst.rt());
   if (inst.shamt() == 0) {
@@ -2524,14 +2756,18 @@ void MipsBase::InstDsll(uint32_t opcode) {
   WriteGpr64(inst.rd(), rd_value);
 }
 
-void MipsBase::InstDsll32(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstDsll32(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   uint64_t rt_value = ReadGpr64(inst.rt());
   uint64_t rd_value = rt_value << (inst.shamt() + 32);
   WriteGpr64(inst.rd(), rd_value);
 }
 
-void MipsBase::InstDsllv(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstDsllv(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   uint64_t rt_value = ReadGpr64(inst.rt());
   uint64_t rs_value = ReadGpr64(inst.rs());
@@ -2539,7 +2775,9 @@ void MipsBase::InstDsllv(uint32_t opcode) {
   WriteGpr64(inst.rd(), rd_value);
 }
 
-void MipsBase::InstDsra(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstDsra(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   int64_t rt_value = ReadGpr64(inst.rt());
   if (inst.shamt() == 0) {
@@ -2550,14 +2788,18 @@ void MipsBase::InstDsra(uint32_t opcode) {
   WriteGpr64(inst.rd(), rd_value);
 }
 
-void MipsBase::InstDsra32(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstDsra32(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   int64_t rt_value = ReadGpr64(inst.rt());
   int64_t rd_value = rt_value >> (inst.shamt() + 32);
   WriteGpr64(inst.rd(), rd_value);
 }
 
-void MipsBase::InstDsrav(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstDsrav(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   int64_t rt_value = ReadGpr64(inst.rt());
   uint64_t rs_value = ReadGpr64(inst.rs());
@@ -2565,7 +2807,9 @@ void MipsBase::InstDsrav(uint32_t opcode) {
   WriteGpr64(inst.rd(), rd_value);
 }
 
-void MipsBase::InstDsrl(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstDsrl(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   uint64_t rt_value = ReadGpr64(inst.rt());
   if (inst.shamt() == 0) {
@@ -2576,14 +2820,18 @@ void MipsBase::InstDsrl(uint32_t opcode) {
   WriteGpr64(inst.rd(), rd_value);
 }
 
-void MipsBase::InstDsrl32(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstDsrl32(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   uint64_t rt_value = ReadGpr64(inst.rt());
   uint64_t rd_value = rt_value >> (inst.shamt() + 32);
   WriteGpr64(inst.rd(), rd_value);
 }
 
-void MipsBase::InstDsrlv(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstDsrlv(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   uint64_t rt_value = ReadGpr64(inst.rt());
   uint64_t rs_value = ReadGpr64(inst.rs());
@@ -2591,7 +2839,9 @@ void MipsBase::InstDsrlv(uint32_t opcode) {
   WriteGpr64(inst.rd(), rd_value);
 }
 
-void MipsBase::InstDmfc(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstDmfc(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   uint8_t cop_id = (opcode >> 26) & 3;
   if (!IsCopEnabled(cop_id)) {
@@ -2603,7 +2853,9 @@ void MipsBase::InstDmfc(uint32_t opcode) {
   WriteGpr64(inst.rt(), cop_value);
 }
 
-void MipsBase::InstDmtc(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstDmtc(uint32_t opcode) {
   RTypeInst inst = MipsInst(opcode).GetRType();
   uint8_t cop_id = (opcode >> 26) & 3;
   if (!IsCopEnabled(cop_id)) {
@@ -2620,7 +2872,9 @@ void MipsBase::InstDmtc(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstLd(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstLd(uint32_t opcode) {
   ITypeInst inst = MipsInst(opcode).GetIType();
   uint64_t rs_value = ReadGpr64(inst.rs());
   int32_t imm = sext_itype_imm_i32(inst);
@@ -2637,7 +2891,9 @@ void MipsBase::InstLd(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstLdc(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstLdc(uint32_t opcode) {
   uint8_t cop_id = (opcode >> 26) & 3;
   if (!IsCopEnabled(cop_id)) {
     cop_cause_ = cop_id;
@@ -2655,7 +2911,9 @@ void MipsBase::InstLdc(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstLdl(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstLdl(uint32_t opcode) {
   ITypeInst inst = MipsInst(opcode).GetIType();
   uint64_t rs_value = ReadGpr64(inst.rs());
   int32_t imm = sext_itype_imm_i32(inst);
@@ -2680,7 +2938,9 @@ void MipsBase::InstLdl(uint32_t opcode) {
   WriteGpr64(inst.rt(), rt_value);
 }
 
-void MipsBase::InstLdr(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstLdr(uint32_t opcode) {
   ITypeInst inst = MipsInst(opcode).GetIType();
   uint64_t rs_value = ReadGpr64(inst.rs());
   int32_t imm = sext_itype_imm_i32(inst);
@@ -2706,7 +2966,9 @@ void MipsBase::InstLdr(uint32_t opcode) {
   WriteGpr64(inst.rt(), rt_value);
 }
 
-void MipsBase::InstLwu(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstLwu(uint32_t opcode) {
   ITypeInst inst = MipsInst(opcode).GetIType();
   uint64_t rs_value = ReadGpr64(inst.rs());
   int32_t imm = sext_itype_imm_i32(inst);
@@ -2723,7 +2985,9 @@ void MipsBase::InstLwu(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstSd(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstSd(uint32_t opcode) {
   ITypeInst inst = MipsInst(opcode).GetIType();
   uint64_t rs_value = ReadGpr64(inst.rs());
   int32_t imm = sext_itype_imm_i32(inst);
@@ -2737,7 +3001,9 @@ void MipsBase::InstSd(uint32_t opcode) {
   Store64(address, rt_value);
 }
 
-void MipsBase::InstSdc(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstSdc(uint32_t opcode) {
   uint8_t cop_id = (opcode >> 26) & 3;
   if (!IsCopEnabled(cop_id)) {
     cop_cause_ = cop_id;
@@ -2752,7 +3018,9 @@ void MipsBase::InstSdc(uint32_t opcode) {
   Store64(address, copt_value);
 }
 
-void MipsBase::InstSdl(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstSdl(uint32_t opcode) {
   ITypeInst inst = MipsInst(opcode).GetIType();
   uint64_t rs_value = ReadGpr64(inst.rs());
   int32_t imm = sext_itype_imm_i32(inst);
@@ -2770,7 +3038,9 @@ void MipsBase::InstSdl(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstSdr(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstSdr(uint32_t opcode) {
   ITypeInst inst = MipsInst(opcode).GetIType();
   uint64_t rs_value = ReadGpr64(inst.rs());
   int32_t imm = sext_itype_imm_i32(inst);
@@ -2789,11 +3059,15 @@ void MipsBase::InstSdr(uint32_t opcode) {
   }
 }
 
-void MipsBase::InstSync(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstSync(uint32_t opcode) {
   // Do nothing
 }
 
-void MipsBase::InstUnknown(uint32_t opcode) {
+
+MIPS_TEMPLATE
+void MIPS_BASE::InstUnknown(uint32_t opcode) {
   fmt::print("Unknown instruction: {:08X} @ {:08X}\n", opcode, pc_);
   DumpProcessorLog();
   PANIC("Unknown instruction");
@@ -2814,3 +3088,7 @@ std::string MipsLog::ToString(bool is_64bit) {
   }
   return result;
 }
+
+// Explicit instantiations — keep definitions out of other TUs
+template class MipsBase<MipsTlbNormal, true,  false, true>;
+template class MipsBase<MipsTlbDummy,  false, false, false>;

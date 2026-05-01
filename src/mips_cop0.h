@@ -5,7 +5,7 @@ class MipsCop0 : public MipsCopBase {
  public:
   MipsCop0();
 
-  void ConnectCpu(MipsBase* cpu) override;
+  void ConnectCpu(MipsInterface* cpu) override;
   void Reset() override;
   void Command(uint32_t command) override;
   uint32_t Read32(int idx) override;
@@ -23,7 +23,7 @@ class MipsCop0 : public MipsCopBase {
   void WriteCount(uint32_t value);
   uint32_t GetCount();
 
-  MipsBase* cpu_;
+  MipsInterface* cpu_;
 
   uint64_t context_;
   uint32_t wired_;
