@@ -6,15 +6,16 @@
 #include "bus_base.h"
 #include "mips_cache.h"
 #include "mips_cop.h"
-#include "mips_tlb.h"
-#include "mips_tlb_normal.h"
-#include "mips_tlb_dummy.h"
 #include "mips_hook.h"
+#include "mips_tlb.h"
+#include "mips_tlb_dummy.h"
+#include "mips_tlb_normal.h"
 
 typedef __int128_t int128_t;
 typedef __uint128_t uint128_t;
 
 const bool kLazyInterruptPolling = false;
+const int kInterruptCheckInterval = 4;
 const int kMipsInstLogCount = 2048;
 
 enum class ExceptionCause {
@@ -91,12 +92,11 @@ class MipsInterface {
   virtual void QueueCacheClear() = 0;
 };
 
-template<
-  typename TlbType,
-  bool kIs64Bit,
-  bool kHasLoadDelay,
-  bool kHasCop0
->
+template <
+    typename TlbType,
+    bool kIs64Bit,
+    bool kHasLoadDelay,
+    bool kHasCop0>
 class MipsBase : public MipsInterface {
  public:
   MipsBase();
@@ -282,6 +282,7 @@ class MipsBase : public MipsInterface {
 
   int cycle_spent_;
   int cpi_counter_;
+  int interrupt_poll_counter_;
   uint64_t cycle_spent_total_;
   bool has_branch_delay_;
   uint64_t branch_delay_dst_;
@@ -306,8 +307,8 @@ class MipsBase : public MipsInterface {
   TlbType tlb_;
 };
 
-using N64Mips = MipsBase<MipsTlbNormal, true,  false, true>;
-using RspMips = MipsBase<MipsTlbDummy,  false, false, false>;
+using N64Mips = MipsBase<MipsTlbNormal, true, false, true>;
+using RspMips = MipsBase<MipsTlbDummy, false, false, false>;
 
-extern template class MipsBase<MipsTlbNormal, true,  false, true>;
-extern template class MipsBase<MipsTlbDummy,  false, false, false>;
+extern template class MipsBase<MipsTlbNormal, true, false, true>;
+extern template class MipsBase<MipsTlbDummy, false, false, false>;

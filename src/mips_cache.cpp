@@ -4,8 +4,8 @@
 #include "panic.h"
 
 // Bring in TLB types so they're complete for explicit instantiation
-#include "mips_tlb_normal.h"
 #include "mips_tlb_dummy.h"
+#include "mips_tlb_normal.h"
 
 namespace {
 
@@ -13,7 +13,7 @@ constexpr uint64_t kPhysicalUnmappedAddress = 0xFFFFFFFFFFFFFFFFUL;
 
 }  // namespace
 
-#define CACHE_TEMPLATE template<typename MipsT, typename TlbType>
+#define CACHE_TEMPLATE template <typename MipsT, typename TlbType>
 #define CACHE_CLASS MipsCache<MipsT, TlbType>
 
 CACHE_TEMPLATE
